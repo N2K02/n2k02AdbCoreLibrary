@@ -164,6 +164,59 @@ class AdbCoreTest {
         assertFalse(core.retry(auto = true))
     }
 
+    @Test fun healthProbeSerializesWithVerifiedCommand() = runBlocking {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val wire = object : AdbWire {
+            override var connected = false
+            override var mode = AdbTransportMode.NONE
+            var inFlight = 0
+            var maxInFlight = 0
+            override suspend fun pair(port: Int, code: String) = true
+            override suspend fun connectTls(port: Int): Boolean {
+                connected = true
+                mode = AdbTransportMode.WIRELESS_TLS
+                return true
+            }
+            override suspend fun connectTcp(): Boolean = false
+            override suspend fun run(command: String, timeoutMs: Long): String {
+                inFlight++
+                maxInFlight = maxOf(maxInFlight, inFlight)
+                try {
+                    if (command == "echo hold") {
+                        entered.complete(Unit)
+                        release.await()
+                    }
+                    return if (command == "id -u") "2000" else "done"
+                } finally {
+                    inFlight--
+                }
+            }
+            override suspend fun switchToTcp() = false
+            override suspend fun switchToUsb() = false
+            override suspend fun close() {
+                connected = false
+                mode = AdbTransportMode.NONE
+            }
+        }
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val core = AdbCore(wire, prefs, Discovery(), listenerAvailable = { false })
+        assertTrue(core.retry())
+        val command = kotlinx.coroutines.async { core.execVerified("echo hold") }
+        kotlinx.coroutines.withTimeout(5_000) { entered.await() }
+        val probe = kotlinx.coroutines.async { core.probeVerifiedShell() }
+        kotlinx.coroutines.delay(50)
+        assertFalse(probe.isCompleted)
+        release.complete(Unit)
+        assertEquals("done", kotlinx.coroutines.withTimeout(5_000) { command.await() })
+        assertTrue(kotlinx.coroutines.withTimeout(5_000) { probe.await() })
+        assertEquals(1, wire.maxInFlight)
+        core.quit()
+    }
+
     @Test fun invalidUidFailsClosed() = runBlocking {
         val wire = Wire().apply { uid = "1000" }
         val prefs = MemoryPrefs().apply {

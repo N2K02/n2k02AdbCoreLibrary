@@ -263,6 +263,15 @@ class AdbCore(
         scope.cancel()
     }
 
+    /** A health probe uses the same mutex as verified shell execution. */
+    internal suspend fun probeVerifiedShell(): Boolean = lock.withLock {
+        runCatching {
+            !stopped && !preferences.manuallyStopped() &&
+                wire.connected && wire.mode != AdbTransportMode.NONE &&
+                AdbVerification.verifiedUid(wire.run("id -u", 3_000)) == 2000
+        }.getOrDefault(false)
+    }
+
     private fun configureWatchdog() {
         watchdog?.cancel()
         watchdog = null
@@ -275,12 +284,7 @@ class AdbCore(
                 // Health probes must serialize with privileged commands and
                 // transport switches. Probing the wire outside the core lock
                 // can consume a command response or race with a disconnect.
-                val healthy = lock.withLock {
-                    runCatching {
-                        wire.connected && wire.mode != AdbTransportMode.NONE &&
-                            AdbVerification.verifiedUid(wire.run("id -u", 3_000)) == 2000
-                    }.getOrDefault(false)
-                }
+                val healthy = probeVerifiedShell()
                 if (!healthy && !stopped && !preferences.manuallyStopped()) retry(auto = true)
             }
         }
