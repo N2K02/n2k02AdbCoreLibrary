@@ -1,0 +1,26 @@
+name: Validate shared ADB core
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.8.2'
+      - name: Install Android SDK 37
+        run: |
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;37.0.0"
+      - name: Unit tests, lint and library release
+        run: gradle :adb-core:testDebugUnitTest :adb-core:lintDebug :adb-core:assembleRelease --stacktrace
