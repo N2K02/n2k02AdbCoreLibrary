@@ -272,10 +272,16 @@ class AdbCore(
             while (isActive && !stopped && !preferences.manuallyStopped()) {
                 delay(45_000)
                 if (!preferences.enabled(AdbOption.WATCHDOG)) break
-                val healthy = runCatching {
-                    wire.connected && AdbVerification.verifiedUid(wire.run("id -u", 3_000)) == 2000
-                }.getOrDefault(false)
-                if (!healthy) retry(auto = true)
+                // Health probes must serialize with privileged commands and
+                // transport switches. Probing the wire outside the core lock
+                // can consume a command response or race with a disconnect.
+                val healthy = lock.withLock {
+                    runCatching {
+                        wire.connected && wire.mode != AdbTransportMode.NONE &&
+                            AdbVerification.verifiedUid(wire.run("id -u", 3_000)) == 2000
+                    }.getOrDefault(false)
+                }
+                if (!healthy && !stopped && !preferences.manuallyStopped()) retry(auto = true)
             }
         }
     }
