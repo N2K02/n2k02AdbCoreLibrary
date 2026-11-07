@@ -268,14 +268,14 @@ class AdbCore(
      * Unlike quit(), the core remains reusable after this operation.
      */
     suspend fun disconnectIdle() {
-        if (stopped) return
+        if (stopped || preferences.manuallyStopped()) return
         retryJob?.cancel()
         retryJob = null
         // LibAdbWire.close() retires the current session without waiting for a
         // native readLine() that cancellation alone cannot unblock.
         wire.close()
         lock.withLock {
-            if (!stopped) {
+            if (!stopped && !preferences.manuallyStopped()) {
                 _state.value = AdbState(
                     phase = AdbPhase.IDLE,
                     message = "ADB disconnected; saved authorization retained"
