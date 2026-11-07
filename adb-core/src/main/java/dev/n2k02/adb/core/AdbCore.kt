@@ -1,6 +1,7 @@
 package dev.n2k02.adb.core
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,6 +54,9 @@ class AdbCore(
                         AdbService.PAIRING -> previous.copy(pairingPort = event.port)
                         AdbService.CONNECTION -> previous.copy(connectionPort = event.port)
                     }
+                }
+                if (event.service == AdbService.PAIRING) {
+                    SharedAdbPairingAccessibilityService.notifyPairingPortDiscovered()
                 }
                 if (event.service == AdbService.CONNECTION && !_state.value.connected) {
                     // Duplicate mDNS resolves must not cancel an in-flight TLS handshake.
@@ -117,7 +121,7 @@ class AdbCore(
             !preferences.enabled(AdbOption.AUTO_PAIR) ||
             pairingSession?.isActive == true) return
         acquireService()
-        pairingSession = scope.launch {
+        pairingSession = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try { delay(120_000L) }
             finally { releaseService() }
         }
