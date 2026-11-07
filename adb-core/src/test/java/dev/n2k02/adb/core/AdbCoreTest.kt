@@ -2,6 +2,7 @@ package dev.n2k02.adb.core
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -38,6 +39,7 @@ class AdbCoreTest {
         var uid = "2000"
         var actionCalls = 0
         var tcpAvailable = false
+        var tcpSwitchAllowed = true
         var tlsAvailable = true
         var closeCount = 0
         var tcpStarts = 0
@@ -60,6 +62,7 @@ class AdbCoreTest {
             return "command output"
         }
         override suspend fun switchToTcp(): Boolean {
+            if (!tcpSwitchAllowed) return false
             connected = false
             mode = AdbTransportMode.NONE
             tcpAvailable = true
@@ -77,6 +80,177 @@ class AdbCoreTest {
     }
     private fun create(wire: Wire, prefs: MemoryPrefs = MemoryPrefs(), discovery: Discovery = Discovery()) =
         AdbCore(wire, prefs, discovery, listenerAvailable = { false })
+
+    @Test fun verifiedHookCanExecutePrivilegedCommandWithoutDeadlock() = runBlocking {
+        val wire = Wire()
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val completed = kotlinx.coroutines.CompletableDeferred<String>()
+        lateinit var core: AdbCore
+        core = AdbCore(wire, prefs, Discovery(), hooks = object : AdbHostHooks {
+            override suspend fun onVerifiedShell() {
+                completed.complete(core.execVerified("echo from host hook"))
+            }
+        }, listenerAvailable = { false })
+        assertTrue(kotlinx.coroutines.withTimeout(5_000) { core.retry() })
+        assertEquals("command output",
+            kotlinx.coroutines.withTimeout(5_000) { completed.await() })
+        core.quit()
+    }
+
+    @Test fun quitCancelsPendingHostCallbacks() = runBlocking {
+        val wire = Wire()
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val cancelled = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val core = AdbCore(wire, prefs, Discovery(), hooks = object : AdbHostHooks {
+            override suspend fun onVerifiedShell() {
+                entered.complete(Unit)
+                try {
+                    kotlinx.coroutines.awaitCancellation()
+                } finally {
+                    cancelled.complete(Unit)
+                }
+            }
+        }, listenerAvailable = { false })
+        assertTrue(core.retry())
+        kotlinx.coroutines.withTimeout(5_000) { entered.await() }
+        core.quit()
+        kotlinx.coroutines.withTimeout(5_000) { cancelled.await() }
+        assertTrue(prefs.manuallyStopped())
+    }
+
+    @Test fun serviceOwnerKeepsRecoveryAliveAfterSettingsPageCloses() = runBlocking {
+        val wire = Wire().apply { tlsAvailable = false }
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val discovery = Discovery()
+        val core = create(wire, prefs, discovery)
+        core.acquireService()
+        core.enterPage()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.started == 0) kotlinx.coroutines.delay(10)
+        }
+        core.leavePage()
+        // A background service still owns the recovery lifecycle.
+        assertEquals(0, discovery.stopped)
+        core.releaseService()
+        assertTrue(discovery.stopped > 0)
+        core.quit()
+    }
+
+    @Test fun quitReleasesDiscoveryEvenWithActiveServiceAndPage() = runBlocking {
+        val wire = Wire().apply { tlsAvailable = false }
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val discovery = Discovery()
+        val core = create(wire, prefs, discovery)
+        core.acquireService()
+        core.enterPage()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.started == 0) kotlinx.coroutines.delay(10)
+        }
+        core.quit()
+        assertTrue(discovery.stopped > 0)
+        assertTrue(wire.closeCount > 0)
+        assertTrue(prefs.manuallyStopped())
+        assertEquals(AdbPhase.STOPPED, core.state.value.phase)
+        assertFalse(core.retry(auto = true))
+    }
+
+    @Test fun healthProbeSerializesWithVerifiedCommand() = runBlocking {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val wire = object : AdbWire {
+            override var connected = false
+            override var mode = AdbTransportMode.NONE
+            var inFlight = 0
+            var maxInFlight = 0
+            override suspend fun pair(port: Int, code: String) = true
+            override suspend fun connectTls(port: Int): Boolean {
+                connected = true
+                mode = AdbTransportMode.WIRELESS_TLS
+                return true
+            }
+            override suspend fun connectTcp(): Boolean = false
+            override suspend fun run(command: String, timeoutMs: Long): String {
+                inFlight++
+                maxInFlight = maxOf(maxInFlight, inFlight)
+                try {
+                    if (command == "echo hold") {
+                        entered.complete(Unit)
+                        release.await()
+                    }
+                    return if (command == "id -u") "2000" else "done"
+                } finally {
+                    inFlight--
+                }
+            }
+            override suspend fun switchToTcp() = false
+            override suspend fun switchToUsb() = false
+            override suspend fun close() {
+                connected = false
+                mode = AdbTransportMode.NONE
+            }
+        }
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val core = AdbCore(wire, prefs, Discovery(), listenerAvailable = { false })
+        assertTrue(core.retry())
+        val command = async { core.execVerified("echo hold") }
+        kotlinx.coroutines.withTimeout(5_000) { entered.await() }
+        val probe = async { core.probeVerifiedShell() }
+        kotlinx.coroutines.delay(50)
+        assertFalse(probe.isCompleted)
+        release.complete(Unit)
+        assertEquals("done", kotlinx.coroutines.withTimeout(5_000) { command.await() })
+        assertTrue(kotlinx.coroutines.withTimeout(5_000) { probe.await() })
+        assertEquals(1, wire.maxInFlight)
+        core.quit()
+    }
+
+    @Test fun existingTlsSessionPromotesToTcpWhenEnabled() = runBlocking {
+        val wire = Wire().apply {
+            connected = true
+            mode = AdbTransportMode.WIRELESS_TLS
+        }
+        val prefs = MemoryPrefs()
+        val hook = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val core = AdbCore(wire, prefs, Discovery(), hooks = object : AdbHostHooks {
+            override suspend fun onVerifiedShell() { hook.complete(Unit) }
+        }, listenerAvailable = { false })
+        assertTrue(core.retry())
+        assertEquals(AdbTransportMode.LOCAL_TCP_5555, core.state.value.transport)
+        assertTrue(wire.tcpStarts > 0)
+        kotlinx.coroutines.withTimeout(5_000) { hook.await() }
+        core.quit()
+    }
+
+    @Test fun existingTlsSessionDoesNotClaimSuccessIfTcpPromotionFails() = runBlocking {
+        val wire = Wire().apply {
+            connected = true
+            mode = AdbTransportMode.WIRELESS_TLS
+            tcpSwitchAllowed = false
+        }
+        val prefs = MemoryPrefs()
+        val core = create(wire, prefs)
+        assertFalse(core.retry())
+        assertFalse(core.state.value.connected)
+        assertEquals(AdbPhase.NEEDS_SETUP, core.state.value.phase)
+        assertEquals(0, wire.tcpStarts)
+        core.quit()
+    }
 
     @Test fun invalidUidFailsClosed() = runBlocking {
         val wire = Wire().apply { uid = "1000" }
