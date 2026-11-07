@@ -2,6 +2,7 @@ package dev.n2k02.adb.core
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
@@ -205,9 +206,9 @@ class AdbCoreTest {
         }
         val core = AdbCore(wire, prefs, Discovery(), listenerAvailable = { false })
         assertTrue(core.retry())
-        val command = kotlinx.coroutines.async { core.execVerified("echo hold") }
+        val command = async { core.execVerified("echo hold") }
         kotlinx.coroutines.withTimeout(5_000) { entered.await() }
-        val probe = kotlinx.coroutines.async { core.probeVerifiedShell() }
+        val probe = async { core.probeVerifiedShell() }
         kotlinx.coroutines.delay(50)
         assertFalse(probe.isCompleted)
         release.complete(Unit)
