@@ -39,6 +39,7 @@ class AdbCoreTest {
         var uid = "2000"
         var actionCalls = 0
         var tcpAvailable = false
+        var tcpSwitchAllowed = true
         var tlsAvailable = true
         var closeCount = 0
         var tcpStarts = 0
@@ -61,6 +62,7 @@ class AdbCoreTest {
             return "command output"
         }
         override suspend fun switchToTcp(): Boolean {
+            if (!tcpSwitchAllowed) return false
             connected = false
             mode = AdbTransportMode.NONE
             tcpAvailable = true
@@ -215,6 +217,38 @@ class AdbCoreTest {
         assertEquals("done", kotlinx.coroutines.withTimeout(5_000) { command.await() })
         assertTrue(kotlinx.coroutines.withTimeout(5_000) { probe.await() })
         assertEquals(1, wire.maxInFlight)
+        core.quit()
+    }
+
+    @Test fun existingTlsSessionPromotesToTcpWhenEnabled() = runBlocking {
+        val wire = Wire().apply {
+            connected = true
+            mode = AdbTransportMode.WIRELESS_TLS
+        }
+        val prefs = MemoryPrefs()
+        val hook = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val core = AdbCore(wire, prefs, Discovery(), hooks = object : AdbHostHooks {
+            override suspend fun onVerifiedShell() { hook.complete(Unit) }
+        }, listenerAvailable = { false })
+        assertTrue(core.retry())
+        assertEquals(AdbTransportMode.LOCAL_TCP_5555, core.state.value.transport)
+        assertTrue(wire.tcpStarts > 0)
+        kotlinx.coroutines.withTimeout(5_000) { hook.await() }
+        core.quit()
+    }
+
+    @Test fun existingTlsSessionDoesNotClaimSuccessIfTcpPromotionFails() = runBlocking {
+        val wire = Wire().apply {
+            connected = true
+            mode = AdbTransportMode.WIRELESS_TLS
+            tcpSwitchAllowed = false
+        }
+        val prefs = MemoryPrefs()
+        val core = create(wire, prefs)
+        assertFalse(core.retry())
+        assertFalse(core.state.value.connected)
+        assertEquals(AdbPhase.NEEDS_SETUP, core.state.value.phase)
+        assertEquals(0, wire.tcpStarts)
         core.quit()
     }
 

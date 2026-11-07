@@ -106,8 +106,15 @@ class AdbCore(
     suspend fun retry(auto: Boolean = false): Boolean = lock.withLock {
         if (stopped || (auto && preferences.manuallyStopped())) return@withLock false
         if (!auto) preferences.setManuallyStopped(false)
-        if (wire.connected && wire.mode != AdbTransportMode.NONE &&
-            verifyCurrent(wire.mode)) return@withLock true
+        if (wire.connected && wire.mode != AdbTransportMode.NONE) {
+            val promote = wire.mode == AdbTransportMode.WIRELESS_TLS &&
+                preferences.enabled(AdbOption.TCP_5555)
+            if (verifyCurrent(wire.mode, notifyHost = !promote)) {
+                // An already verified TLS connection must still honor the TCP
+                // preference. Do not silently report TLS as the final transport.
+                return@withLock if (promote) promoteTlsToTcp() else true
+            }
+        }
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING, verifiedUid = null,
             transport = AdbTransportMode.NONE, message = "Checking authorized local ADB…")
         if (AdbVerification.mayConnectTcp(preferences.enabled(AdbOption.TCP_5555),
@@ -143,9 +150,16 @@ class AdbCore(
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING,
             message = "Connecting to authorized Wireless debugging…", verifiedUid = null)
         val connected = runCatching { wire.connectTls(port) }.getOrDefault(false)
-        if (!connected || !verifyCurrent(AdbTransportMode.WIRELESS_TLS)) return false
+        val promote = preferences.enabled(AdbOption.TCP_5555)
+        if (!connected || !verifyCurrent(AdbTransportMode.WIRELESS_TLS,
+                notifyHost = !promote)) return false
         preferences.setLastTlsPort(port)
-        if (!preferences.enabled(AdbOption.TCP_5555)) return true
+        if (!promote) return true
+        return promoteTlsToTcp()
+    }
+
+    /** Promote a verified TLS shell without requiring its old discovery port. */
+    private suspend fun promoteTlsToTcp(): Boolean {
         // Do not claim TLS success if the requested TCP promotion fails.
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING,
             message = "Switching authorized ADB to TCP/5555…", verifiedUid = null)
@@ -166,7 +180,7 @@ class AdbCore(
     }
 
     /** Only UID 2000 is accepted; cached UI badges are never proof of privilege. */
-    private suspend fun verifyCurrent(mode: AdbTransportMode): Boolean {
+    private suspend fun verifyCurrent(mode: AdbTransportMode, notifyHost: Boolean = true): Boolean {
         val uid = runCatching { AdbVerification.verifiedUid(wire.run("id -u", 3_000)) }.getOrNull()
         if (uid != 2000) {
             runCatching { wire.close() }
@@ -185,12 +199,14 @@ class AdbCore(
         // Host hooks may call execVerified(), which takes lock. Never invoke a
         // suspend host callback while retry()/connectTls() still holds that lock.
         // Scope cancellation on Quit prevents callbacks from surviving shutdown.
-        scope.launch {
-            if (stopped || preferences.manuallyStopped()) return@launch
-            runCatching { hooks.onVerifiedShell() }
-            if (!stopped && !preferences.manuallyStopped() &&
-                preferences.enabled(AdbOption.RESTORE_AFTER_RESTART)) {
-                runCatching { hooks.onRestoreAfterRestartChanged(true) }
+        if (notifyHost) {
+            scope.launch {
+                if (stopped || preferences.manuallyStopped()) return@launch
+                runCatching { hooks.onVerifiedShell() }
+                if (!stopped && !preferences.manuallyStopped() &&
+                    preferences.enabled(AdbOption.RESTORE_AFTER_RESTART)) {
+                    runCatching { hooks.onRestoreAfterRestartChanged(true) }
+                }
             }
         }
         return true
