@@ -17,16 +17,16 @@ android {
     testOptions { unitTests.isReturnDefaultValues = true }
 }
 dependencies {
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
-    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation(platform("androidx.compose:compose-bom:2026.06.00"))
     implementation("androidx.compose.runtime:runtime")
-    implementation("androidx.compose.material3:material3:1.5.0-beta02")
+    implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation("com.github.MuntashirAkon:libadb-android:3.1.1")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
 }
 afterEvaluate {
     publishing {

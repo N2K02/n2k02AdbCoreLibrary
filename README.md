@@ -29,3 +29,7 @@ Publishing follows n2k02theme and n2k02updater: Android library + Maven Publish 
 - `AdbHomeSetupPage`, `AdbConnectionSettingsPage`, `AdbDiagnosticsPage`, `AdbPageScaffold` – consistent Material 3 pages.
 
 See [MIGRATION.md](MIGRATION.md) for integration and rollout. This draft is **not yet used by the five apps**.
+
+## Compiler compatibility
+
+The AAR targets **Kotlin 2.2.10** and the Compose 2026.06 BOM to support SDCleaner's Kotlin 2.2 toolchain while remaining consumable by Kotlin 2.4 apps. Consumer apps may use a newer compatible Compose runtime. Pin a published release and validate all build variants; do not let a Kotlin 2.4 stdlib transitively upgrade a Kotlin 2.2 consumer.
