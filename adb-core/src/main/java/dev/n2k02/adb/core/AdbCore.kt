@@ -1,6 +1,5 @@
 package dev.n2k02.adb.core
 
-import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,19 +24,18 @@ interface AdbHostHooks {
 }
 
 class AdbCore(
-    context: Context,
     private val wire: AdbWire,
     val preferences: AdbPreferenceStore,
     private val discovery: AdbDiscovery,
     private val hooks: AdbHostHooks = object : AdbHostHooks {},
     private val listenerAvailable: () -> Boolean = { localListenerAvailable() },
 ) {
-    private val app = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Mutex()
     private val _state = MutableStateFlow(AdbState(lastVerifiedAt = preferences.lastVerifiedAt()))
     val state: StateFlow<AdbState> = _state.asStateFlow()
     private var owners = 0
+    private var serviceOwners = 0
     private var stopped = false
     private var watchdog: Job? = null
     private var retryJob: Job? = null
@@ -69,9 +67,29 @@ class AdbCore(
 
     fun leavePage() {
         owners = (owners - 1).coerceAtLeast(0)
-        if (owners == 0) {
+        if (owners == 0 && serviceOwners == 0) {
             stopDiscovery()
             // App background work is driven by its own service/worker, not a hidden Settings page.
+            watchdog?.cancel()
+            watchdog = null
+        }
+    }
+
+    /**
+     * Services retain recovery independently from visible pages.
+     * Acquire at service start and release at service shutdown, including Quit.
+     */
+    fun acquireService() {
+        if (stopped) return
+        serviceOwners++
+        if (serviceOwners == 1) scope.launch { retry(auto = true) }
+        configureWatchdog()
+    }
+
+    fun releaseService() {
+        serviceOwners = (serviceOwners - 1).coerceAtLeast(0)
+        if (owners == 0 && serviceOwners == 0) {
+            stopDiscovery()
             watchdog?.cancel()
             watchdog = null
         }
@@ -92,7 +110,8 @@ class AdbCore(
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING, verifiedUid = null,
             transport = AdbTransportMode.NONE, message = "Checking authorized local ADB…")
         if (AdbVerification.mayConnectTcp(preferences.enabled(AdbOption.TCP_5555),
-                preferences.manuallyStopped()) && listenerAvailable() && wire.connectTcp() &&
+                preferences.manuallyStopped()) && listenerAvailable() &&
+            runCatching { wire.connectTcp() }.getOrDefault(false) &&
             verifyCurrent(AdbTransportMode.LOCAL_TCP_5555)) return@withLock true
         val tlsPort = preferences.lastTlsPort()
         if (tlsPort != null && attachTls(tlsPort)) return@withLock true
@@ -163,6 +182,9 @@ class AdbCore(
             message = "ADB ready • shell UID 2000")
         stopDiscovery()
         hooks.onVerifiedShell()
+        if (preferences.enabled(AdbOption.RESTORE_AFTER_RESTART)) {
+            hooks.onRestoreAfterRestartChanged(true)
+        }
         return true
     }
 
@@ -199,6 +221,8 @@ class AdbCore(
         stopDiscovery()
         watchdog?.cancel(); watchdog = null
         retryJob?.cancel(); retryJob = null
+        owners = 0
+        serviceOwners = 0
         lock.withLock {
             wire.close()
             _state.value = AdbState(phase = AdbPhase.STOPPED, message = "Stopped by user")
@@ -214,7 +238,7 @@ class AdbCore(
     private fun configureWatchdog() {
         watchdog?.cancel()
         watchdog = null
-        if (stopped || owners <= 0 || preferences.manuallyStopped() ||
+        if (stopped || owners + serviceOwners <= 0 || preferences.manuallyStopped() ||
             !preferences.enabled(AdbOption.WATCHDOG)) return
         watchdog = scope.launch {
             while (isActive && !stopped && !preferences.manuallyStopped()) {
@@ -229,7 +253,7 @@ class AdbCore(
     }
 
     private fun startDiscovery() {
-        if (stopped || preferences.manuallyStopped() || owners == 0) return
+        if (stopped || preferences.manuallyStopped() || owners + serviceOwners == 0) return
         _state.value = _state.value.copy(scanning = true)
         discovery.start()
     }

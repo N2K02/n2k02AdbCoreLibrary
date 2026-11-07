@@ -131,11 +131,15 @@ class LibAdbWire(
                 retire(current)
                 error("ADB transport disconnected")
             }
-            val session = shell ?: ShellSession(current.openStream(SHELL_SERVICE)).also { shell = it }
-            val work = detached.async { session.run(command) }
             val watchdog = detached.launch {
                 delay(timeoutMs)
                 retire(current) // Retire only this manager: never kill an already reconnected one.
+            }
+            // Opening a native stream can block as well: start the independent
+            // deadline before opening it, and never run blocking I/O in the caller.
+            val work = detached.async {
+                val session = shell ?: ShellSession(current.openStream(SHELL_SERVICE)).also { shell = it }
+                session.run(command)
             }
             try {
                 // A cancelled caller must not wait for a native readLine(). Retire the stream instead.

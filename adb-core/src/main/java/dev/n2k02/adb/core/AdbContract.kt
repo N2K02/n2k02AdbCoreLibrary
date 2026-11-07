@@ -57,6 +57,6 @@ internal object AdbVerification {
     fun mayConnectTcp(enabled: Boolean, stopped: Boolean): Boolean = enabled && !stopped
     fun shouldRecover(authorized: Boolean, stopped: Boolean): Boolean = authorized && !stopped
     fun validPairing(port: Int, code: String): Boolean = port in 1..65535 &&
-        code.length == 6 && code.all(Char::isDigit)
+        code.length == 6 && code.all { it in '0'..'9' }
     fun validPort(port: Int): Boolean = port in 1..65535
 }

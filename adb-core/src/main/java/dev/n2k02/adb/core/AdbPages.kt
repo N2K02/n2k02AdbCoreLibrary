@@ -35,6 +35,18 @@ import kotlinx.coroutines.launch
 import java.text.DateFormat
 import java.util.Date
 
+/**
+ * Mount at a stable screen root. Do not mount from a LazyColumn item: scrolling
+ * must not tear down ADB discovery, watchdog or recovery.
+ */
+@Composable
+fun AdbPageLifecycle(adb: AdbCore) {
+    DisposableEffect(adb) {
+        adb.enterPage()
+        onDispose { adb.leavePage() }
+    }
+}
+
 /** One canonical Compose layout for every ADB-enabled N2K02 app. */
 @Composable
 fun AdbConnectionSettingsPage(
@@ -42,15 +54,18 @@ fun AdbConnectionSettingsPage(
     accessibilityEnabled: Boolean,
     onOpenAccessibility: (() -> Unit)? = null,
 ) {
+    AdbPageLifecycle(adb)
     val state by adb.state.collectAsState()
     val scope = rememberCoroutineScope()
     var changeNote by remember { mutableStateOf("") }
+    var autoPair by remember { mutableStateOf(adb.preferences.enabled(AdbOption.AUTO_PAIR)) }
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)) {
         AdbSection("Pairing & recovery") {
             AdbOptionRow(adb, AdbOption.AUTO_PAIR, "Auto-detect pairing code",
-                "Read only Android's pairing dialog through Accessibility.")
-            if (adb.preferences.enabled(AdbOption.AUTO_PAIR) && !accessibilityEnabled) {
+                "Read only Android's pairing dialog through Accessibility.",
+                onCheckedChange = { autoPair = it })
+            if (autoPair && !accessibilityEnabled) {
                 Text("Accessibility is required for automatic pairing. Manual pairing is available on Home.",
                     style = MaterialTheme.typography.bodySmall)
                 onOpenAccessibility?.let { action ->
@@ -94,10 +109,7 @@ fun AdbHomeSetupPage(adb: AdbCore) {
     var pairingCode by remember { mutableStateOf("") }
     var connectionPort by remember { mutableStateOf("") }
     var manual by remember { mutableStateOf(false) }
-    DisposableEffect(adb) {
-        adb.enterPage()
-        onDispose { adb.leavePage() }
-    }
+    // The host must call AdbPageLifecycle at a stable screen root (not a lazy item).
     AdbSection("ADB setup") {
         Text(if (state.connected) "Connected • shell UID 2000 verified" else
             "ADB setup required • shell UID 2000 not verified",
@@ -145,10 +157,7 @@ fun AdbHomeSetupPage(adb: AdbCore) {
 fun AdbDiagnosticsPage(adb: AdbCore) {
     val state by adb.state.collectAsState()
     val scope = rememberCoroutineScope()
-    DisposableEffect(adb) {
-        adb.enterPage()
-        onDispose { adb.leavePage() }
-    }
+    AdbPageLifecycle(adb)
     Column(modifier = Modifier.fillMaxWidth().padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)) {
         AdbSection("ADB connection") {
@@ -190,11 +199,15 @@ private fun AdbSection(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun AdbOptionRow(adb: AdbCore, option: AdbOption, title: String, detail: String) {
+private fun AdbOptionRow(
+    adb: AdbCore, option: AdbOption, title: String, detail: String,
+    onCheckedChange: ((Boolean) -> Unit)? = null,
+) {
     val scope = rememberCoroutineScope()
     var checked by remember(option) { mutableStateOf(adb.preferences.enabled(option)) }
     Row(Modifier.fillMaxWidth().clickable {
         checked = !checked
+        onCheckedChange?.invoke(checked)
         scope.launch { adb.setOption(option, checked) }
     }, verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).padding(end = 12.dp),
@@ -205,6 +218,7 @@ private fun AdbOptionRow(adb: AdbCore, option: AdbOption, title: String, detail:
         }
         Switch(checked = checked, onCheckedChange = {
             checked = it
+            onCheckedChange?.invoke(it)
             scope.launch { adb.setOption(option, it) }
         })
     }
