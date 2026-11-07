@@ -7,6 +7,7 @@
         <!-- Optional, user-enabled. Reads only the Android Settings pairing dialog. -->
         <service
             android:name="dev.n2k02.adb.core.SharedAdbPairingAccessibilityService"
+            android:enabled="false"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
             android:label="ADB pairing code reader">
