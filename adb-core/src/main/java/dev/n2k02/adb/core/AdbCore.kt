@@ -106,7 +106,8 @@ class AdbCore(
     suspend fun retry(auto: Boolean = false): Boolean = lock.withLock {
         if (stopped || (auto && preferences.manuallyStopped())) return@withLock false
         if (!auto) preferences.setManuallyStopped(false)
-        if (wire.connected && verifyCurrent(_state.value.transport)) return@withLock true
+        if (wire.connected && wire.mode != AdbTransportMode.NONE &&
+            verifyCurrent(wire.mode)) return@withLock true
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING, verifiedUid = null,
             transport = AdbTransportMode.NONE, message = "Checking authorized local ADB…")
         if (AdbVerification.mayConnectTcp(preferences.enabled(AdbOption.TCP_5555),
@@ -202,6 +203,25 @@ class AdbCore(
         }
     }
 
+    /**
+     * Privileged shell execution is guarded for EVERY command, not just when a
+     * badge was last drawn. Identity proof and the command share the core lock,
+     * while the wire serializes the actual shell stream.
+     */
+    suspend fun execVerified(command: String, timeoutMs: Long = 15_000): String = lock.withLock {
+        check(!stopped && !preferences.manuallyStopped()) { "ADB stopped by user" }
+        check(wire.connected && wire.mode != AdbTransportMode.NONE) { "ADB is not connected" }
+        val uid = runCatching { AdbVerification.verifiedUid(wire.run("id -u", 3_000)) }.getOrNull()
+        if (uid != 2000) {
+            wire.close()
+            _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
+                verifiedUid = null, transport = AdbTransportMode.NONE,
+                message = "Privileged command blocked: shell UID 2000 unavailable")
+            throw SecurityException("ADB shell UID 2000 not verified")
+        }
+        wire.run(command, timeoutMs)
+    }
+
     /** TCP disable is device-wide; it may affect other ADB clients. Always explicit. */
     suspend fun disableTcp(): Boolean = lock.withLock {
         preferences.setEnabled(AdbOption.TCP_5555, false)
@@ -223,8 +243,9 @@ class AdbCore(
         retryJob?.cancel(); retryJob = null
         owners = 0
         serviceOwners = 0
+        // Interrupt a blocking native read BEFORE waiting for the connection lock.
+        wire.close()
         lock.withLock {
-            wire.close()
             _state.value = AdbState(phase = AdbPhase.STOPPED, message = "Stopped by user")
         }
     }

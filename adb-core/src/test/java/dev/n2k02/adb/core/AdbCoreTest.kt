@@ -34,7 +34,9 @@ class AdbCoreTest {
     }
     private class Wire : AdbWire {
         override var connected = false
+        override var mode = AdbTransportMode.NONE
         var uid = "2000"
+        var actionCalls = 0
         var tcpAvailable = false
         var tlsAvailable = true
         var closeCount = 0
@@ -43,28 +45,35 @@ class AdbCoreTest {
         override suspend fun pair(port: Int, code: String) = true
         override suspend fun connectTls(port: Int): Boolean {
             connected = tlsAvailable
+            mode = if (connected) AdbTransportMode.WIRELESS_TLS else AdbTransportMode.NONE
             return connected
         }
         override suspend fun connectTcp(): Boolean {
             tcpStarts++
             connected = tcpAvailable
+            mode = if (connected) AdbTransportMode.LOCAL_TCP_5555 else AdbTransportMode.NONE
             return connected
         }
         override suspend fun run(command: String, timeoutMs: Long): String {
-            assertEquals("id -u", command)
-            return uid
+            if (command == "id -u") return uid
+            actionCalls++
+            return "command output"
         }
         override suspend fun switchToTcp(): Boolean {
             connected = false
+            mode = AdbTransportMode.NONE
             tcpAvailable = true
             return true
         }
         override suspend fun switchToUsb(): Boolean {
             usbSwitches++
             connected = false
+            mode = AdbTransportMode.NONE
             return true
         }
-        override suspend fun close() { closeCount++; connected = false }
+        override suspend fun close() {
+            closeCount++; connected = false; mode = AdbTransportMode.NONE
+        }
     }
     private fun create(wire: Wire, prefs: MemoryPrefs = MemoryPrefs(), discovery: Discovery = Discovery()) =
         AdbCore(wire, prefs, discovery, listenerAvailable = { false })
@@ -129,6 +138,28 @@ class AdbCoreTest {
         assertFalse(core.retry(auto = true))
         core.quit()
         assertFalse(core.retry())
+    }
+
+    @Test fun commandRequiresFreshUid2000() = runBlocking {
+        val wire = Wire()
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val core = create(wire, prefs)
+        assertTrue(core.retry())
+        assertEquals("command output", core.execVerified("echo safe"))
+        assertEquals(1, wire.actionCalls)
+        wire.uid = "1000"
+        try {
+            core.execVerified("echo forbidden")
+            fail("Non-shell command was executed")
+        } catch (expected: SecurityException) {
+            assertTrue(expected.message!!.contains("UID 2000"))
+        }
+        assertEquals(1, wire.actionCalls)
+        assertFalse(core.state.value.connected)
+        core.quit()
     }
 
     @Test fun cannotBootRecoverWithoutAuthorizationOrSetting() = runBlocking {

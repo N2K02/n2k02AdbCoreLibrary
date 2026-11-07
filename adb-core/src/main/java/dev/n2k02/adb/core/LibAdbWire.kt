@@ -40,6 +40,9 @@ class LibAdbWire(
     @Volatile private var currentPort: Int? = null
     @Volatile private var lastConnected: Boolean = false
     override val connected: Boolean get() = lastConnected
+    override val mode: AdbTransportMode get() = if (!lastConnected) AdbTransportMode.NONE
+        else if (currentPort == TCP_PORT) AdbTransportMode.LOCAL_TCP_5555
+        else AdbTransportMode.WIRELESS_TLS
 
     private fun newManager(): AbsAdbConnectionManager {
         val identity = identitySource.load(context.applicationContext)

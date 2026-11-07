@@ -42,6 +42,7 @@ interface AdbPreferenceStore {
 
 interface AdbWire {
     val connected: Boolean
+    val mode: AdbTransportMode
     suspend fun pair(port: Int, code: String): Boolean
     suspend fun connectTls(port: Int): Boolean
     suspend fun connectTcp(): Boolean
