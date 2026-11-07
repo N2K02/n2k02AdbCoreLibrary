@@ -122,6 +122,48 @@ class AdbCoreTest {
         assertTrue(prefs.manuallyStopped())
     }
 
+    @Test fun serviceOwnerKeepsRecoveryAliveAfterSettingsPageCloses() = runBlocking {
+        val wire = Wire().apply { tlsAvailable = false }
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val discovery = Discovery()
+        val core = create(wire, prefs, discovery)
+        core.acquireService()
+        core.enterPage()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.started == 0) kotlinx.coroutines.delay(10)
+        }
+        core.leavePage()
+        // A background service still owns the recovery lifecycle.
+        assertEquals(0, discovery.stopped)
+        core.releaseService()
+        assertTrue(discovery.stopped > 0)
+        core.quit()
+    }
+
+    @Test fun quitReleasesDiscoveryEvenWithActiveServiceAndPage() = runBlocking {
+        val wire = Wire().apply { tlsAvailable = false }
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val discovery = Discovery()
+        val core = create(wire, prefs, discovery)
+        core.acquireService()
+        core.enterPage()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.started == 0) kotlinx.coroutines.delay(10)
+        }
+        core.quit()
+        assertTrue(discovery.stopped > 0)
+        assertTrue(wire.closeCount > 0)
+        assertTrue(prefs.manuallyStopped())
+        assertEquals(AdbPhase.STOPPED, core.state.value.phase)
+        assertFalse(core.retry(auto = true))
+    }
+
     @Test fun invalidUidFailsClosed() = runBlocking {
         val wire = Wire().apply { uid = "1000" }
         val prefs = MemoryPrefs().apply {
