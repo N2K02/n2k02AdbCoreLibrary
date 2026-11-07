@@ -1,6 +1,7 @@
 package dev.n2k02.adb.core
 
 import android.content.Context
+import android.net.wifi.WifiManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import kotlinx.coroutines.flow.Flow
@@ -15,11 +16,17 @@ interface AdbDiscovery {
     val events: Flow<AdbDiscoveredPort>
     fun start()
     fun stop()
+    /** Visible reason when an OS permission prevents local mDNS. */
+    fun unavailableReason(): String? = null
 }
 
 /** Android Wireless debugging mDNS; never accepts another device's address. */
 class LocalAdbDiscovery(context: Context) : AdbDiscovery {
-    private val manager = context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
+    private val app = context.applicationContext
+    private val manager = app.getSystemService(Context.NSD_SERVICE) as NsdManager
+    private val wifi = app.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    private var multicast: WifiManager.MulticastLock? = null
+    override fun unavailableReason(): String? = AdbNetworkAccess.blocker(app)
     private val found = MutableSharedFlow<AdbDiscoveredPort>(extraBufferCapacity = 16)
     override val events: Flow<AdbDiscoveredPort> = found
     private val listeners = mutableListOf<NsdManager.DiscoveryListener>()
@@ -28,8 +35,16 @@ class LocalAdbDiscovery(context: Context) : AdbDiscovery {
 
     @Synchronized
     override fun start() {
-        if (active) return
+        if (active || unavailableReason() != null) return
         active = true
+        // Background mDNS reception may require an explicit multicast lock.
+        // Hold it only for the lifetime of active discovery to avoid battery drain.
+        runCatching {
+            multicast = wifi?.createMulticastLock("n2k02-adb-mdns")?.also {
+                it.setReferenceCounted(false)
+                it.acquire()
+            }
+        }
         generation++
         val thisGeneration = generation
         discover("_adb-tls-pairing._tcp.", AdbService.PAIRING, thisGeneration)
@@ -90,5 +105,7 @@ class LocalAdbDiscovery(context: Context) : AdbDiscovery {
         val snapshot = listeners.toList()
         listeners.clear()
         snapshot.forEach { runCatching { manager.stopServiceDiscovery(it) } }
+        multicast?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        multicast = null
     }
 }

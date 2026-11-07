@@ -384,6 +384,12 @@ class AdbCore(
 
     private fun startDiscovery() {
         if (stopped || preferences.manuallyStopped() || owners + serviceOwners == 0) return
+        val blocker = discovery.unavailableReason()
+        if (blocker != null) {
+            _state.value = _state.value.copy(
+                phase = AdbPhase.NEEDS_SETUP, scanning = false, message = blocker)
+            return
+        }
         _state.value = _state.value.copy(scanning = true)
         discovery.start()
     }
