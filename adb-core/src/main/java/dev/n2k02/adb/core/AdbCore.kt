@@ -1,5 +1,7 @@
 package dev.n2k02.adb.core
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -10,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -39,33 +42,45 @@ class AdbCore(
     private var stopped = false
     private var watchdog: Job? = null
     private var retryJob: Job? = null
+    private var pairingSession: Job? = null
+    @Volatile private var connectingPort: Int? = null
 
     init {
         scope.launch {
             discovery.events.collect { event ->
                 if (stopped || preferences.manuallyStopped()) return@collect
-                val previous = _state.value
-                _state.value = when (event.service) {
-                    AdbService.PAIRING -> previous.copy(pairingPort = event.port)
-                    AdbService.CONNECTION -> previous.copy(connectionPort = event.port)
+                _state.update { previous ->
+                    when (event.service) {
+                        AdbService.PAIRING -> previous.copy(pairingPort = event.port)
+                        AdbService.CONNECTION -> previous.copy(connectionPort = event.port)
+                    }
                 }
-                if (event.service == AdbService.CONNECTION && !previous.connected) {
+                if (event.service == AdbService.PAIRING) {
+                    SharedAdbPairingAccessibilityService.notifyPairingPortDiscovered()
+                }
+                if (event.service == AdbService.CONNECTION && !_state.value.connected) {
+                    // Duplicate mDNS resolves must not cancel an in-flight TLS handshake.
+                    if (connectingPort == event.port && retryJob?.isActive == true) return@collect
                     retryJob?.cancel()
-                    retryJob = scope.launch { connectTls(event.port) }
+                    connectingPort = event.port
+                    retryJob = scope.launch {
+                        try { connectTls(event.port) }
+                        finally { if (connectingPort == event.port) connectingPort = null }
+                    }
                 }
             }
         }
     }
 
     /** Any shared page can safely share one instance; late callbacks are ignored on shutdown. */
-    fun enterPage() {
+    @Synchronized fun enterPage() {
         if (stopped) return
         owners++
         if (owners == 1) scope.launch { retry(auto = true) }
         configureWatchdog()
     }
 
-    fun leavePage() {
+    @Synchronized fun leavePage() {
         owners = (owners - 1).coerceAtLeast(0)
         if (owners == 0 && serviceOwners == 0) {
             stopDiscovery()
@@ -79,20 +94,52 @@ class AdbCore(
      * Services retain recovery independently from visible pages.
      * Acquire at service start and release at service shutdown, including Quit.
      */
-    fun acquireService() {
+    @Synchronized fun acquireService() {
         if (stopped) return
         serviceOwners++
         if (serviceOwners == 1) scope.launch { retry(auto = true) }
         configureWatchdog()
     }
 
-    fun releaseService() {
+    @Synchronized fun releaseService() {
         serviceOwners = (serviceOwners - 1).coerceAtLeast(0)
         if (owners == 0 && serviceOwners == 0) {
             stopDiscovery()
             watchdog?.cancel()
             watchdog = null
         }
+    }
+
+    /**
+     * Temporarily keep mDNS discovery alive while Android's system pairing
+     * dialog is visible, even if the host Activity is backgrounded. The
+     * Accessibility reader supplies the code; no app collects or stores it.
+     * One bounded lease per pairing attempt prevents owner/watchdog leaks.
+     */
+    @Synchronized fun beginAutomaticPairingDiscovery() {
+        if (stopped || preferences.manuallyStopped() ||
+            !preferences.enabled(AdbOption.AUTO_PAIR) ||
+            pairingSession?.isActive == true) return
+        acquireService()
+        pairingSession = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try { delay(120_000L) }
+            finally { releaseService() }
+        }
+    }
+
+    /** Release the temporary pairing owner when verification succeeds or UI closes. */
+    @Synchronized fun endAutomaticPairingDiscovery() {
+        pairingSession?.cancel()
+        pairingSession = null
+    }
+
+    /** ADB failures must never turn coroutine cancellation into retry/success. */
+    private suspend fun <T> guarded(block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        Result.failure(failure)
     }
 
     /** Called from the host boot receiver, never silently overriding deliberate Stop. */
@@ -119,7 +166,7 @@ class AdbCore(
             transport = AdbTransportMode.NONE, message = "Checking authorized local ADB…")
         if (AdbVerification.mayConnectTcp(preferences.enabled(AdbOption.TCP_5555),
                 preferences.manuallyStopped()) && listenerAvailable() &&
-            runCatching { wire.connectTcp() }.getOrDefault(false) &&
+            guarded { wire.connectTcp() }.getOrDefault(false) &&
             verifyCurrent(AdbTransportMode.LOCAL_TCP_5555)) return@withLock true
         val tlsPort = preferences.lastTlsPort()
         if (tlsPort != null && attachTls(tlsPort)) return@withLock true
@@ -133,7 +180,7 @@ class AdbCore(
         if (stopped || !AdbVerification.validPairing(port, code)) return@withLock false
         preferences.setManuallyStopped(false)
         _state.value = _state.value.copy(phase = AdbPhase.PAIRING, message = "Pairing with this phone…")
-        val paired = runCatching { wire.pair(port, code) }.getOrDefault(false)
+        val paired = guarded { wire.pair(port, code) }.getOrDefault(false)
         _state.value = _state.value.copy(phase = if (paired) AdbPhase.SEARCHING else AdbPhase.NEEDS_SETUP,
             message = if (paired) "Paired. Looking for the Wireless debugging connection port…"
                 else "Pairing failed; check the six-digit code")
@@ -149,7 +196,7 @@ class AdbCore(
     private suspend fun attachTls(port: Int): Boolean {
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING,
             message = "Connecting to authorized Wireless debugging…", verifiedUid = null)
-        val connected = runCatching { wire.connectTls(port) }.getOrDefault(false)
+        val connected = guarded { wire.connectTls(port) }.getOrDefault(false)
         val promote = preferences.enabled(AdbOption.TCP_5555)
         if (!connected || !verifyCurrent(AdbTransportMode.WIRELESS_TLS,
                 notifyHost = !promote)) return false
@@ -163,14 +210,14 @@ class AdbCore(
         // Do not claim TLS success if the requested TCP promotion fails.
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING,
             message = "Switching authorized ADB to TCP/5555…", verifiedUid = null)
-        if (!runCatching { wire.switchToTcp() }.getOrDefault(false)) {
+        if (!guarded { wire.switchToTcp() }.getOrDefault(false)) {
             _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
                 message = "TCP/5555 switch failed", verifiedUid = null)
             return false
         }
         repeat(4) {
             delay(1_100)
-            if (runCatching { wire.connectTcp() }.getOrDefault(false) &&
+            if (guarded { wire.connectTcp() }.getOrDefault(false) &&
                 verifyCurrent(AdbTransportMode.LOCAL_TCP_5555)) return true
         }
         _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
@@ -181,9 +228,9 @@ class AdbCore(
 
     /** Only UID 2000 is accepted; cached UI badges are never proof of privilege. */
     private suspend fun verifyCurrent(mode: AdbTransportMode, notifyHost: Boolean = true): Boolean {
-        val uid = runCatching { AdbVerification.verifiedUid(wire.run("id -u", 3_000)) }.getOrNull()
+        val uid = guarded { AdbVerification.verifiedUid(wire.run("id -u", 3_000)) }.getOrNull()
         if (uid != 2000) {
-            runCatching { wire.close() }
+            guarded { wire.close() }
             _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
                 verifiedUid = null, transport = AdbTransportMode.NONE,
                 message = "ADB connection failed shell UID 2000 verification")
@@ -196,16 +243,17 @@ class AdbCore(
             transport = mode, lastVerifiedAt = now, scanning = false,
             message = "ADB ready • shell UID 2000")
         stopDiscovery()
+        endAutomaticPairingDiscovery()
         // Host hooks may call execVerified(), which takes lock. Never invoke a
         // suspend host callback while retry()/connectTls() still holds that lock.
         // Scope cancellation on Quit prevents callbacks from surviving shutdown.
         if (notifyHost) {
             scope.launch {
                 if (stopped || preferences.manuallyStopped()) return@launch
-                runCatching { hooks.onVerifiedShell() }
+                guarded { hooks.onVerifiedShell() }
                 if (!stopped && !preferences.manuallyStopped() &&
                     preferences.enabled(AdbOption.RESTORE_AFTER_RESTART)) {
-                    runCatching { hooks.onRestoreAfterRestartChanged(true) }
+                    guarded { hooks.onRestoreAfterRestartChanged(true) }
                 }
             }
         }
@@ -234,7 +282,7 @@ class AdbCore(
     suspend fun execVerified(command: String, timeoutMs: Long = 15_000): String = lock.withLock {
         check(!stopped && !preferences.manuallyStopped()) { "ADB stopped by user" }
         check(wire.connected && wire.mode != AdbTransportMode.NONE) { "ADB is not connected" }
-        val uid = runCatching { AdbVerification.verifiedUid(wire.run("id -u", 3_000)) }.getOrNull()
+        val uid = guarded { AdbVerification.verifiedUid(wire.run("id -u", 3_000)) }.getOrNull()
         if (uid != 2000) {
             wire.close()
             _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
@@ -249,8 +297,8 @@ class AdbCore(
     suspend fun disableTcp(): Boolean = lock.withLock {
         preferences.setEnabled(AdbOption.TCP_5555, false)
         if (stopped || state.value.transport != AdbTransportMode.LOCAL_TCP_5555) return@withLock true
-        val result = runCatching { wire.switchToUsb() }.getOrDefault(false)
-        runCatching { wire.close() }
+        val result = guarded { wire.switchToUsb() }.getOrDefault(false)
+        guarded { wire.close() }
         _state.value = _state.value.copy(phase = AdbPhase.IDLE, verifiedUid = null,
             transport = AdbTransportMode.NONE, message = if (result)
                 "TCP/5555 disabled. Reconnect through Wireless debugging."
@@ -291,6 +339,7 @@ class AdbCore(
         stopDiscovery()
         watchdog?.cancel(); watchdog = null
         retryJob?.cancel(); retryJob = null
+        endAutomaticPairingDiscovery()
         owners = 0
         serviceOwners = 0
         // Interrupt a blocking native read BEFORE waiting for the connection lock.
@@ -335,6 +384,12 @@ class AdbCore(
 
     private fun startDiscovery() {
         if (stopped || preferences.manuallyStopped() || owners + serviceOwners == 0) return
+        val blocker = discovery.unavailableReason()
+        if (blocker != null) {
+            _state.value = _state.value.copy(
+                phase = AdbPhase.NEEDS_SETUP, scanning = false, message = blocker)
+            return
+        }
         _state.value = _state.value.copy(scanning = true)
         discovery.start()
     }

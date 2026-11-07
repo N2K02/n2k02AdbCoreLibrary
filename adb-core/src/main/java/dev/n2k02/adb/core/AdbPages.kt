@@ -9,13 +9,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -88,7 +86,7 @@ fun AdbConnectionSettingsPage(
                 "Read only Android's pairing dialog through Accessibility.",
                 onCheckedChange = { autoPair = it })
             if (autoPair && !accessibilityEnabled) {
-                Text("Accessibility is required for automatic pairing. Manual pairing is available on Home.",
+                Text("Automatic pairing requires the enabled Accessibility reader and Android's pairing dialog.",
                     style = MaterialTheme.typography.bodySmall)
                 onOpenAccessibility?.let { action ->
                     OutlinedButton(onClick = action) { Text("Enable Accessibility") }
@@ -123,54 +121,45 @@ fun AdbConnectionSettingsPage(
 
 /** First-time pairing belongs on Home, not inside the shared Settings cards. */
 @Composable
-fun AdbHomeSetupPage(adb: AdbCore) {
+fun AdbHomeSetupPage(
+    adb: AdbCore,
+    accessibilityEnabled: Boolean = rememberAdbAccessibilityEnabled(),
+    onOpenAccessibility: (() -> Unit)? = null,
+) {
     val context = LocalContext.current
     val state by adb.state.collectAsState()
     val scope = rememberCoroutineScope()
-    var pairingPort by remember { mutableStateOf("") }
-    var pairingCode by remember { mutableStateOf("") }
-    var connectionPort by remember { mutableStateOf("") }
-    var manual by remember { mutableStateOf(false) }
-    // The host must call AdbPageLifecycle at a stable screen root (not a lazy item).
     AdbSection("ADB setup") {
-        Text(if (state.connected) "Connected • shell UID 2000 verified" else
-            "ADB setup required • shell UID 2000 not verified",
+        Text(if (state.connected) "Connected • shell UID 2000 verified"
+            else "Automatic ADB pairing and recovery",
             style = MaterialTheme.typography.titleSmall)
         Text(state.message, style = MaterialTheme.typography.bodySmall)
         if (!state.connected) {
-            Text("Enable Wireless debugging and USB debugging in Developer options.",
+            Text("Enable USB debugging and Wireless debugging. For the first " +
+                "authorization, open Android Settings > Wireless debugging > " +
+                "Pair device with pairing code. When Accessibility is enabled " +
+                "the code is captured and paired automatically from that dialog.",
                 style = MaterialTheme.typography.bodySmall)
+            if (!accessibilityEnabled) {
+                Text("Allow the pairing Accessibility service in Android Settings " +
+                    "for automatic pairing.", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = {
+                    onOpenAccessibility?.invoke() ?: context.startActivity(
+                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }, modifier = Modifier.fillMaxWidth()) { Text("Enable Accessibility") }
+            }
             OutlinedButton(onClick = {
                 context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }, modifier = Modifier.fillMaxWidth()) { Text("Open Developer options") }
-            OutlinedButton(onClick = { scope.launch { adb.retry() } },
-                modifier = Modifier.fillMaxWidth()) { Text("Find / Retry") }
-            Text("Pairing port: ${state.pairingPort ?: "Not detected"}",
+            Text(if (state.scanning) "Searching for this phone's ADB services…"
+                else "Waiting for an authorized ADB service",
                 style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = { manual = !manual }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (manual) "Hide manual pairing" else "Manual pairing (fallback)")
-            }
-            if (manual) {
-                OutlinedTextField(pairingPort,
-                    { pairingPort = it.filter(Char::isDigit).take(5) },
-                    label = { Text("Pairing port") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(pairingCode,
-                    { pairingCode = it.filter(Char::isDigit).take(6) },
-                    label = { Text("Six-digit pairing code") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                Button(onClick = { scope.launch { adb.pair(pairingPort.toIntOrNull() ?: -1, pairingCode) } },
-                    enabled = pairingPort.toIntOrNull() in 1..65535 && pairingCode.length == 6,
-                    modifier = Modifier.fillMaxWidth()) { Text("Pair") }
-                OutlinedTextField(connectionPort,
-                    { connectionPort = it.filter(Char::isDigit).take(5) },
-                    label = { Text("Wireless debugging connection port") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                Button(onClick = { scope.launch { adb.connectTls(connectionPort.toIntOrNull() ?: -1) } },
-                    enabled = connectionPort.toIntOrNull() in 1..65535,
-                    modifier = Modifier.fillMaxWidth()) { Text("Connect") }
-            }
+            Text("Pairing port: " + (state.pairingPort?.toString() ?: "Not detected"),
+                style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick = { scope.launch { adb.retry() } },
+                modifier = Modifier.fillMaxWidth()) { Text("Retry discovery") }
         }
     }
 }
