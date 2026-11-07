@@ -182,9 +182,16 @@ class AdbCore(
             transport = mode, lastVerifiedAt = now, scanning = false,
             message = "ADB ready • shell UID 2000")
         stopDiscovery()
-        hooks.onVerifiedShell()
-        if (preferences.enabled(AdbOption.RESTORE_AFTER_RESTART)) {
-            hooks.onRestoreAfterRestartChanged(true)
+        // Host hooks may call execVerified(), which takes lock. Never invoke a
+        // suspend host callback while retry()/connectTls() still holds that lock.
+        // Scope cancellation on Quit prevents callbacks from surviving shutdown.
+        scope.launch {
+            if (stopped || preferences.manuallyStopped()) return@launch
+            runCatching { hooks.onVerifiedShell() }
+            if (!stopped && !preferences.manuallyStopped() &&
+                preferences.enabled(AdbOption.RESTORE_AFTER_RESTART)) {
+                runCatching { hooks.onRestoreAfterRestartChanged(true) }
+            }
         }
         return true
     }

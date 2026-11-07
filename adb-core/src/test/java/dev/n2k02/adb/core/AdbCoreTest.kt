@@ -78,6 +78,50 @@ class AdbCoreTest {
     private fun create(wire: Wire, prefs: MemoryPrefs = MemoryPrefs(), discovery: Discovery = Discovery()) =
         AdbCore(wire, prefs, discovery, listenerAvailable = { false })
 
+    @Test fun verifiedHookCanExecutePrivilegedCommandWithoutDeadlock() = runBlocking {
+        val wire = Wire()
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val completed = kotlinx.coroutines.CompletableDeferred<String>()
+        lateinit var core: AdbCore
+        core = AdbCore(wire, prefs, Discovery(), hooks = object : AdbHostHooks {
+            override suspend fun onVerifiedShell() {
+                completed.complete(core.execVerified("echo from host hook"))
+            }
+        }, listenerAvailable = { false })
+        assertTrue(kotlinx.coroutines.withTimeout(5_000) { core.retry() })
+        assertEquals("command output",
+            kotlinx.coroutines.withTimeout(5_000) { completed.await() })
+        core.quit()
+    }
+
+    @Test fun quitCancelsPendingHostCallbacks() = runBlocking {
+        val wire = Wire()
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val cancelled = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val core = AdbCore(wire, prefs, Discovery(), hooks = object : AdbHostHooks {
+            override suspend fun onVerifiedShell() {
+                entered.complete(Unit)
+                try {
+                    kotlinx.coroutines.awaitCancellation()
+                } finally {
+                    cancelled.complete(Unit)
+                }
+            }
+        }, listenerAvailable = { false })
+        assertTrue(core.retry())
+        kotlinx.coroutines.withTimeout(5_000) { entered.await() }
+        core.quit()
+        kotlinx.coroutines.withTimeout(5_000) { cancelled.await() }
+        assertTrue(prefs.manuallyStopped())
+    }
+
     @Test fun invalidUidFailsClosed() = runBlocking {
         val wire = Wire().apply { uid = "1000" }
         val prefs = MemoryPrefs().apply {
