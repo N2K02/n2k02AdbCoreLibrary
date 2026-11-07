@@ -137,7 +137,19 @@ class AdbCore(
         _state.value = _state.value.copy(phase = if (paired) AdbPhase.SEARCHING else AdbPhase.NEEDS_SETUP,
             message = if (paired) "Paired. Looking for the Wireless debugging connection port…"
                 else "Pairing failed; check the six-digit code")
-        if (paired) startDiscovery()
+        if (paired) {
+            val knownConnectionPort = _state.value.connectionPort
+            // mDNS connection may have been discovered before pairing was
+            // authorized. It is not guaranteed to be announced again.
+            if (knownConnectionPort != null) {
+                attachTls(knownConnectionPort)
+            } else {
+                // Force fresh DNS-SD callbacks after Android's pairing dialog
+                // closes, rather than depending on an already active scanner.
+                stopDiscovery()
+                startDiscovery()
+            }
+        }
         paired
     }
 

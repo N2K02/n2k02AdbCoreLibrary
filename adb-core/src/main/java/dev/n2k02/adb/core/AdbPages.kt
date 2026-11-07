@@ -127,10 +127,6 @@ fun AdbHomeSetupPage(adb: AdbCore) {
     val context = LocalContext.current
     val state by adb.state.collectAsState()
     val scope = rememberCoroutineScope()
-    var pairingPort by remember { mutableStateOf("") }
-    var pairingCode by remember { mutableStateOf("") }
-    var connectionPort by remember { mutableStateOf("") }
-    var manual by remember { mutableStateOf(false) }
     // The host must call AdbPageLifecycle at a stable screen root (not a lazy item).
     AdbSection("ADB setup") {
         Text(if (state.connected) "Connected • shell UID 2000 verified" else
@@ -144,33 +140,14 @@ fun AdbHomeSetupPage(adb: AdbCore) {
                 context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }, modifier = Modifier.fillMaxWidth()) { Text("Open Developer options") }
-            OutlinedButton(onClick = { scope.launch { adb.retry() } },
-                modifier = Modifier.fillMaxWidth()) { Text("Find / Retry") }
-            Text("Pairing port: ${state.pairingPort ?: "Not detected"}",
+            Text("Automatic pairing is active. Open Android's 'Pair device with pairing code' " +
+                "dialog once and allow this app's pairing-code Accessibility service. " +
+                "The six-digit code and port are read from Android Settings; " +
+                "no manual entry is required.",
                 style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = { manual = !manual }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (manual) "Hide manual pairing" else "Manual pairing (fallback)")
-            }
-            if (manual) {
-                OutlinedTextField(pairingPort,
-                    { pairingPort = it.filter(Char::isDigit).take(5) },
-                    label = { Text("Pairing port") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(pairingCode,
-                    { pairingCode = it.filter(Char::isDigit).take(6) },
-                    label = { Text("Six-digit pairing code") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                Button(onClick = { scope.launch { adb.pair(pairingPort.toIntOrNull() ?: -1, pairingCode) } },
-                    enabled = pairingPort.toIntOrNull() in 1..65535 && pairingCode.length == 6,
-                    modifier = Modifier.fillMaxWidth()) { Text("Pair") }
-                OutlinedTextField(connectionPort,
-                    { connectionPort = it.filter(Char::isDigit).take(5) },
-                    label = { Text("Wireless debugging connection port") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth())
-                Button(onClick = { scope.launch { adb.connectTls(connectionPort.toIntOrNull() ?: -1) } },
-                    enabled = connectionPort.toIntOrNull() in 1..65535,
-                    modifier = Modifier.fillMaxWidth()) { Text("Connect") }
-            }
+            Text("Discovery: " + if (state.scanning) "Scanning" else "Waiting for Android",
+                style = MaterialTheme.typography.bodySmall)
+
         }
     }
 }

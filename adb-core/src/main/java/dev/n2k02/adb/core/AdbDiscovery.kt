@@ -3,6 +3,8 @@ package dev.n2k02.adb.core
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
+import android.util.Log
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import java.net.InetAddress
@@ -23,6 +25,8 @@ class LocalAdbDiscovery(context: Context) : AdbDiscovery {
     private val found = MutableSharedFlow<AdbDiscoveredPort>(extraBufferCapacity = 16)
     override val events: Flow<AdbDiscoveredPort> = found
     private val listeners = mutableListOf<NsdManager.DiscoveryListener>()
+    private val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    private var multicastLock: WifiManager.MulticastLock? = null
     private var active = false
     private var generation = 0L
 
@@ -32,6 +36,14 @@ class LocalAdbDiscovery(context: Context) : AdbDiscovery {
         active = true
         generation++
         val thisGeneration = generation
+        // Some Android Wi-Fi stacks drop mDNS responses without a multicast
+        // lock. Only hold it while scanning, never for the lifetime of the app.
+        multicastLock = runCatching {
+            wifi?.createMulticastLock("n2k02-adb-discovery")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.getOrNull()
         discover("_adb-tls-pairing._tcp.", AdbService.PAIRING, thisGeneration)
         discover("_adb-tls-connect._tcp.", AdbService.CONNECTION, thisGeneration)
     }
@@ -39,12 +51,17 @@ class LocalAdbDiscovery(context: Context) : AdbDiscovery {
     private fun discover(type: String, service: AdbService, generationId: Long) {
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) = Unit
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) = stopOne(this)
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.w("N2K02AdbCore", "mDNS discovery failed: $serviceType ($errorCode)")
+                stopOne(this)
+            }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
             override fun onDiscoveryStopped(serviceType: String) = Unit
             override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                if (serviceInfo.serviceType != type || !isCurrent(generationId)) return
+                // Android NSD may suffix the service type with ".local.".
+                if (!serviceInfo.serviceType.startsWith(type.removeSuffix(".")) ||
+                    !isCurrent(generationId)) return
                 runCatching {
                     manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
                         override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) = Unit
@@ -90,5 +107,7 @@ class LocalAdbDiscovery(context: Context) : AdbDiscovery {
         val snapshot = listeners.toList()
         listeners.clear()
         snapshot.forEach { runCatching { manager.stopServiceDiscovery(it) } }
+        runCatching { multicastLock?.release() }
+        multicastLock = null
     }
 }
