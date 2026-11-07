@@ -22,9 +22,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,6 +48,24 @@ fun AdbPageLifecycle(adb: AdbCore) {
     DisposableEffect(adb) {
         adb.enterPage()
         onDispose { adb.leavePage() }
+    }
+}
+
+/** Reflect Accessibility grants after returning from Android Settings without polling. */
+@Composable
+fun rememberAdbAccessibilityEnabled(): Boolean {
+    val context = LocalContext.current
+    val owner = LocalLifecycleOwner.current
+    var resumeTick by remember { mutableIntStateOf(0) }
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    return remember(resumeTick, context) {
+        SharedAdbPairingAccessibilityService.isEnabled(context)
     }
 }
 
