@@ -30,6 +30,8 @@ class AdbCoreTest {
         override val events: Flow<AdbDiscoveredPort> = MutableSharedFlow()
         var started = 0
         var stopped = 0
+        var reason: String? = null
+        override fun unavailableReason(): String? = reason
         override fun start() { started++ }
         override fun stop() { stopped++ }
     }
@@ -249,6 +251,57 @@ class AdbCoreTest {
         assertFalse(core.state.value.connected)
         assertEquals(AdbPhase.NEEDS_SETUP, core.state.value.phase)
         assertEquals(0, wire.tcpStarts)
+        core.quit()
+    }
+
+    @Test fun automaticPairingKeepsDiscoveryOwnedUntilReleased() = runBlocking {
+        val wire = Wire().apply { tlsAvailable = false }
+        val prefs = MemoryPrefs().apply {
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val discovery = Discovery()
+        val core = create(wire, prefs, discovery)
+        core.beginAutomaticPairingDiscovery()
+        core.beginAutomaticPairingDiscovery() // Rapid Accessibility events share one lease.
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.started == 0) kotlinx.coroutines.delay(10)
+        }
+        assertEquals(1, discovery.started)
+        assertEquals(0, discovery.stopped)
+        core.endAutomaticPairingDiscovery()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.stopped == 0) kotlinx.coroutines.delay(10)
+        }
+        core.quit()
+    }
+
+    @Test fun automaticPairingCannotUndoManualStopOrOptOut() = runBlocking {
+        val prefs = MemoryPrefs().apply { stopped = true }
+        val discovery = Discovery()
+        val core = create(Wire(), prefs, discovery)
+        core.beginAutomaticPairingDiscovery()
+        assertEquals(0, discovery.started)
+        prefs.stopped = false
+        prefs.setEnabled(AdbOption.AUTO_PAIR, false)
+        core.beginAutomaticPairingDiscovery()
+        assertEquals(0, discovery.started)
+        core.quit()
+    }
+
+    @Test fun missingLocalNetworkPermissionIsVisibleInsteadOfSilentScan() = runBlocking {
+        val discovery = Discovery().apply {
+            reason = "Nearby devices permission required for ADB discovery"
+        }
+        val prefs = MemoryPrefs().apply {
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val core = create(Wire(), prefs, discovery)
+        core.enterPage()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (!core.state.value.message.contains("Nearby devices")) kotlinx.coroutines.delay(10)
+        }
+        assertFalse(core.state.value.scanning)
+        assertEquals(0, discovery.started)
         core.quit()
     }
 

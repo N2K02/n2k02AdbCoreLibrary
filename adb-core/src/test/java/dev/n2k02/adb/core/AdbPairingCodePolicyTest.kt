@@ -17,4 +17,10 @@ class AdbPairingCodePolicyTest {
         assertNull(AdbPairingCodePolicy.extract(listOf("Pairing code", "01234x")))
         assertNull(AdbPairingCodePolicy.extract(listOf("Pairing code", "1234567")))
     }
+    @Test fun onlyActualPairingDialogCanInitiateAutomaticDiscovery() {
+        assertFalse(AdbPairingCodePolicy.isPairingDialog(listOf("Wi-Fi settings", "123456")))
+        assertTrue(AdbPairingCodePolicy.isPairingDialog(listOf("Pair device with pairing code", "123456")))
+        assertNull(AdbPairingCodePolicy.extract(listOf("Not pairing", "123456")))
+    }
+
 }
