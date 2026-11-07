@@ -1,0 +1,35 @@
+name: Publish private ADB core package
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require reviewed main
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: test "$REF_NAME" = "main"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.8.2'
+      - name: Install Android SDK 37
+        run: |
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          "$SDKMANAGER" "platforms;android-37.0" "build-tools;37.0.0"
+      - name: Test and publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          gradle :adb-core:testDebugUnitTest :adb-core:lintDebug :adb-core:assembleRelease :adb-core:publishReleasePublicationToGitHubPackagesRepository -PadbCoreVersion="$VERSION" --stacktrace
+          echo "Published dev.n2k02:adb-core:${VERSION}" >> "$GITHUB_STEP_SUMMARY"
