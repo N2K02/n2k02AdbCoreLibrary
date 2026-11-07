@@ -27,7 +27,8 @@ class AdbCoreTest {
         override fun setAuthorized() { authorized = true }
     }
     private class Discovery : AdbDiscovery {
-        override val events: Flow<AdbDiscoveredPort> = MutableSharedFlow()
+        val portEvents = MutableSharedFlow<AdbDiscoveredPort>(replay = 2)
+        override val events: Flow<AdbDiscoveredPort> = portEvents
         var started = 0
         var stopped = 0
         override fun start() { started++ }
@@ -41,10 +42,14 @@ class AdbCoreTest {
         var tcpAvailable = false
         var tcpSwitchAllowed = true
         var tlsAvailable = true
+        var tlsAvailableAfterPair = false
         var closeCount = 0
         var tcpStarts = 0
         var usbSwitches = 0
-        override suspend fun pair(port: Int, code: String) = true
+        override suspend fun pair(port: Int, code: String): Boolean {
+            if (tlsAvailableAfterPair) tlsAvailable = true
+            return true
+        }
         override suspend fun connectTls(port: Int): Boolean {
             connected = tlsAvailable
             mode = if (connected) AdbTransportMode.WIRELESS_TLS else AdbTransportMode.NONE
@@ -217,6 +222,33 @@ class AdbCoreTest {
         assertEquals("done", kotlinx.coroutines.withTimeout(5_000) { command.await() })
         assertTrue(kotlinx.coroutines.withTimeout(5_000) { probe.await() })
         assertEquals(1, wire.maxInFlight)
+        core.quit()
+    }
+
+    @Test fun pairingAutomaticallyConnectsAlreadyDiscoveredPort() = runBlocking {
+        val wire = Wire().apply {
+            tlsAvailable = false
+            tlsAvailableAfterPair = true
+        }
+        val prefs = MemoryPrefs().apply {
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val discovery = Discovery()
+        val core = create(wire, prefs, discovery)
+        core.acquireService()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.started == 0) kotlinx.coroutines.delay(10)
+        }
+        discovery.portEvents.emit(AdbDiscoveredPort(AdbService.CONNECTION, 39771))
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (core.state.value.connectionPort != 39771) kotlinx.coroutines.delay(10)
+        }
+        // A pre-pair TLS attempt was refused. After successful pairing there
+        // need not be a second mDNS announcement to recover the connection.
+        assertTrue(core.pair(38901, "123456"))
+        assertTrue(core.state.value.connected)
+        assertEquals(AdbTransportMode.WIRELESS_TLS, core.state.value.transport)
+        assertEquals(39771, prefs.lastTlsPort())
         core.quit()
     }
 

@@ -9,6 +9,18 @@ class AdbPairingCodePolicyTest {
         assertFalse(AdbPairingCodePolicy.isAndroidSettings("com.example.malicious"))
         assertFalse(AdbPairingCodePolicy.isAndroidSettings(null))
     }
+    @Test fun automaticPortExtractionUsesOnlyAndroidPairingDialog() {
+        assertNull(AdbPairingCodePolicy.pairingPort(listOf("Wi-Fi settings", "192.168.1.9:43567")))
+        assertEquals(43567, AdbPairingCodePolicy.pairingPort(listOf(
+            "Pair device with pairing code", "Pairing code", "123456", "IP address & port",
+            "192.168.1.9:43567")))
+        assertEquals(38760, AdbPairingCodePolicy.pairingPort(listOf(
+            "Pairing code: 123456", "Pairing port: 38760")))
+        assertNull(AdbPairingCodePolicy.pairingPort(listOf(
+            "Pairing code: 123456", "IP address & port: 192.168.1.8:99999")))
+        assertNull(AdbPairingCodePolicy.pairingPort(listOf(
+            "Pairing code: 123456", "192.168.1.5")))
+    }
     @Test fun codesRequireVisiblePairingDialogHint() {
         assertNull(AdbPairingCodePolicy.extract(listOf("123456", "Wi-Fi settings")))
         assertEquals("123456", AdbPairingCodePolicy.extract(listOf(
