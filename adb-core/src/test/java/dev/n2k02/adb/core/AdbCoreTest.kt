@@ -294,6 +294,46 @@ class AdbCoreTest {
         core.quit()
     }
 
+    @Test fun transientDisconnectPreservesPairingAndAllowsFutureAutoRecovery() = runBlocking {
+        val wire = Wire()
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val core = create(wire, prefs)
+        assertTrue(core.retry())
+        assertTrue(prefs.wasAuthorized())
+        val verifiedTime = prefs.lastVerifiedAt()
+        core.disconnectIdle()
+        assertFalse(wire.connected)
+        assertFalse(core.state.value.connected)
+        assertEquals(AdbPhase.IDLE, core.state.value.phase)
+        assertEquals(AdbTransportMode.NONE, core.state.value.transport)
+        assertFalse(prefs.manuallyStopped())
+        assertEquals(37000, prefs.lastTlsPort())
+        assertEquals(verifiedTime, prefs.lastVerifiedAt())
+        assertTrue(core.retry(auto = true))
+        assertTrue(core.state.value.connected)
+        core.quit()
+    }
+
+    @Test fun transientDisconnectNeverClearsAnExplicitStop() = runBlocking {
+        val wire = Wire()
+        val prefs = MemoryPrefs().apply {
+            tlsPort = 37000
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val core = create(wire, prefs)
+        assertTrue(core.retry())
+        core.stop()
+        assertTrue(prefs.manuallyStopped())
+        core.disconnectIdle()
+        assertTrue(prefs.manuallyStopped())
+        assertEquals(AdbPhase.STOPPED, core.state.value.phase)
+        assertFalse(core.retry(auto = true))
+        core.quit()
+    }
+
     @Test fun manualStopBlocksBootAndAutoRecovery() = runBlocking {
         val wire = Wire()
         val prefs = MemoryPrefs().apply {

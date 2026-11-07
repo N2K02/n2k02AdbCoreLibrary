@@ -258,6 +258,33 @@ class AdbCore(
         result
     }
 
+    /**
+     * Release an on-demand shell without interpreting ordinary cleanup completion
+     * as a user-requested Stop. Used by bounded Workers (e.g. SDCleaner).
+     *
+     * Retire the socket before waiting for the command mutex, so blocking native
+     * stream reads are interrupted. Authorization, pairing, and recovery options
+     * remain persisted; the next automatic or explicit retry is permitted.
+     * Unlike quit(), the core remains reusable after this operation.
+     */
+    suspend fun disconnectIdle() {
+        if (stopped) return
+        retryJob?.cancel()
+        retryJob = null
+        // LibAdbWire.close() retires the current session without waiting for a
+        // native readLine() that cancellation alone cannot unblock.
+        wire.close()
+        lock.withLock {
+            if (!stopped) {
+                _state.value = AdbState(
+                    phase = AdbPhase.IDLE,
+                    message = "ADB disconnected; saved authorization retained"
+                )
+                if (owners + serviceOwners == 0) stopDiscovery()
+            }
+        }
+    }
+
     /** Explicit manual disconnect persists a deliberate Stop across reboot. */
     suspend fun stop() {
         preferences.setManuallyStopped(true)
