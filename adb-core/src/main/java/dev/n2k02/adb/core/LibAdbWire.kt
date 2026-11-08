@@ -59,7 +59,11 @@ class LibAdbWire(
             }
             override fun getPrivateKey(): PrivateKey = sessionKey
             override fun getCertificate(): Certificate = identity.certificate
-            override fun getDeviceName(): String = deviceName
+            // Explicitly qualify the outer field. This anonymous manager itself
+            // overrides getDeviceName(), and an unqualified "deviceName"
+            // resolves to its own Java getter after R8 optimization,
+            // causing StackOverflowError on signed release cold launch.
+            override fun getDeviceName(): String = this@LibAdbWire.deviceName
         }
     }
 
