@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AdbPairingCodePolicyTest {
+    @Test fun pairingPortRequiresRealDialogAndValidPort() {
+        assertNull(AdbPairingCodePolicy.pairingPort(listOf("Wi-Fi settings", "192.168.1.5:37123")))
+        assertEquals(37123, AdbPairingCodePolicy.pairingPort(
+            listOf("Pair device with pairing code", "IP address & port", "192.168.1.5:37123")))
+        assertEquals(37001, AdbPairingCodePolicy.pairingPort(
+            listOf("Pairing code", "Pairing port: 37001")))
+        assertNull(AdbPairingCodePolicy.pairingPort(
+            listOf("Pairing code", "Pairing port: 99999")))
+    }
+
     @Test fun settingsOnly() {
         assertTrue(AdbPairingCodePolicy.isAndroidSettings("com.android.settings"))
         assertFalse(AdbPairingCodePolicy.isAndroidSettings("com.example.malicious"))

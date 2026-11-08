@@ -44,6 +44,7 @@ class AdbCore(
     private var retryJob: Job? = null
     private var pairingSession: Job? = null
     @Volatile private var connectingPort: Int? = null
+    private val discoveredPortRetry = DiscoveryPortRetryGate()
 
     init {
         scope.launch {
@@ -60,7 +61,9 @@ class AdbCore(
                 }
                 if (event.service == AdbService.CONNECTION && !_state.value.connected) {
                     // Duplicate mDNS resolves must not cancel an in-flight TLS handshake.
-                    if (connectingPort == event.port && retryJob?.isActive == true) return@collect
+                    if (_state.value.phase == AdbPhase.PAIRING ||
+                        (connectingPort == event.port && retryJob?.isActive == true) ||
+                        !discoveredPortRetry.mayAttempt(event.port)) return@collect
                     retryJob?.cancel()
                     connectingPort = event.port
                     retryJob = scope.launch {
@@ -184,7 +187,16 @@ class AdbCore(
         _state.value = _state.value.copy(phase = if (paired) AdbPhase.SEARCHING else AdbPhase.NEEDS_SETUP,
             message = if (paired) "Paired. Looking for the Wireless debugging connection port…"
                 else "Pairing failed; check the six-digit code")
-        if (paired) startDiscovery()
+        if (paired) {
+            // mDNS may have announced the connection port before pairing.
+            // Reuse it immediately instead of waiting for a second broadcast.
+            val knownPort = _state.value.connectionPort
+            if (knownPort != null && AdbVerification.validPort(knownPort)) {
+                attachTls(knownPort)
+            } else {
+                startDiscovery()
+            }
+        }
         paired
     }
 

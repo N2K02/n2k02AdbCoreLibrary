@@ -128,7 +128,6 @@ fun AdbHomeSetupPage(
 ) {
     val context = LocalContext.current
     val state by adb.state.collectAsState()
-    val scope = rememberCoroutineScope()
     AdbSection("ADB setup") {
         Text(if (state.connected) "Connected • shell UID 2000 verified"
             else "Automatic ADB pairing and recovery",
@@ -158,8 +157,6 @@ fun AdbHomeSetupPage(
                 style = MaterialTheme.typography.bodySmall)
             Text("Pairing port: " + (state.pairingPort?.toString() ?: "Not detected"),
                 style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = { scope.launch { adb.retry() } },
-                modifier = Modifier.fillMaxWidth()) { Text("Retry discovery") }
         }
     }
 }

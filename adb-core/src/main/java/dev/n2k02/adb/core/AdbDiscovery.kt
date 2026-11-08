@@ -59,7 +59,11 @@ class LocalAdbDiscovery(context: Context) : AdbDiscovery {
             override fun onDiscoveryStopped(serviceType: String) = Unit
             override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                if (serviceInfo.serviceType != type || !isCurrent(generationId)) return
+                // Android NSD may report a trailing .local. suffix.
+                val actual = serviceInfo.serviceType.trimEnd('.')
+                val expected = type.trimEnd('.')
+                if ((actual != expected && actual != "$expected.local") ||
+                    !isCurrent(generationId)) return
                 runCatching {
                     manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
                         override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) = Unit

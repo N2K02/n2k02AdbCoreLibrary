@@ -25,6 +25,20 @@ object AdbPairingCodePolicy {
             it.contains("pair device with", ignoreCase = true) ||
             it.contains("pair with device", ignoreCase = true)
     }
+    /**
+     * The Android pairing dialog displays the local endpoint. When mDNS is
+     * delayed, read ONLY its port and still connect exclusively to loopback.
+     */
+    fun pairingPort(labels: List<String>): Int? {
+        if (!isPairingDialog(labels)) return null
+        val endpoint = Regex("""(?:[0-9]{1,3}\.){3}[0-9]{1,3}:([0-9]{2,5})(?![0-9])""")
+        val explicit = Regex("""(?i)pairing\s+port\s*[:#]?\s*([0-9]{2,5})(?![0-9])""")
+        return labels.asSequence().mapNotNull { label ->
+            (endpoint.find(label)?.groupValues?.get(1) ?:
+                explicit.find(label)?.groupValues?.get(1))?.toIntOrNull()
+        }.firstOrNull { it in 1..65535 }
+    }
+
     fun extract(labels: List<String>): String? {
         if (!isPairingDialog(labels)) return null
         return labels.asSequence().map(String::trim)
@@ -115,7 +129,9 @@ open class SharedAdbPairingAccessibilityService : AccessibilityService() {
         if (!AdbPairingCodePolicy.isPairingDialog(labels)) return false
         core.beginAutomaticPairingDiscovery()
         val code = AdbPairingCodePolicy.extract(labels) ?: return false
-        val port = core.state.value.pairingPort ?: return false
+        val port = core.state.value.pairingPort
+            ?: AdbPairingCodePolicy.pairingPort(labels)
+            ?: return false
         val signature = (port.toString() + ":" + root.windowId + ":" + code).hashCode()
         if (lastSignature != signature && attempts < 3) {
             lastSignature = signature
