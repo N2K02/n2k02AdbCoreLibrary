@@ -217,24 +217,52 @@ class AdbCore(
         return promoteTlsToTcp()
     }
 
-    /** Promote a verified TLS shell without requiring its old discovery port. */
+    /**
+     * The tcpip:5555 control stream may reset because adbd restarted
+     * successfully. Treat the response as advisory; trust only a freshly
+     * connected TCP socket with a live UID-2000 result.
+     * Never restart a TCP listener already used by another ADB client.
+     */
     private suspend fun promoteTlsToTcp(): Boolean {
-        // Do not claim TLS success if the requested TCP promotion fails.
         _state.value = _state.value.copy(phase = AdbPhase.CONNECTING,
-            message = "Switching authorized ADB to TCP/5555…", verifiedUid = null)
-        if (!guarded { wire.switchToTcp() }.getOrDefault(false)) {
-            _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
-                message = "TCP/5555 switch failed", verifiedUid = null)
-            return false
-        }
-        repeat(4) {
-            delay(1_100)
+            message = "Checking authorized TCP/5555…", verifiedUid = null)
+
+        if (listenerAvailable()) {
+            // A different authorized ADB client may already have opened 5555.
+            // Try our key, but do not issue tcpip:5555 against its listener.
             if (guarded { wire.connectTcp() }.getOrDefault(false) &&
                 verifyCurrent(AdbTransportMode.LOCAL_TCP_5555)) return true
+
+            // Our key is not accepted at that listener. Reattach this app's
+            // already-authorized TLS identity, rather than disrupting VRec/SEQ.
+            val savedTlsPort = preferences.lastTlsPort()
+            if (savedTlsPort != null &&
+                guarded { wire.connectTls(savedTlsPort) }.getOrDefault(false) &&
+                verifyCurrent(AdbTransportMode.WIRELESS_TLS)) {
+                _state.value = _state.value.copy(
+                    message = "Authorized TLS ready; existing TCP/5555 listener left unchanged")
+                return true
+            }
+            _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
+                transport = AdbTransportMode.NONE, verifiedUid = null,
+                message = "TCP/5555 belongs to an inaccessible ADB session; TLS reconnect unavailable")
+            return false
+        }
+
+        val acknowledged = guarded { wire.switchToTcp() }.getOrDefault(false)
+        // The old socket may be lost during adbd restart: an error here is
+        // uncertain, not proof the switch failed. Bound the listener probe to
+        // 15 seconds and re-verify shell identity on the new connection.
+        repeat(20) { attempt ->
+            delay(750L)
+            if ((attempt == 0 && acknowledged) || listenerAvailable()) {
+                if (guarded { wire.connectTcp() }.getOrDefault(false) &&
+                    verifyCurrent(AdbTransportMode.LOCAL_TCP_5555)) return true
+            }
         }
         _state.value = _state.value.copy(phase = AdbPhase.NEEDS_SETUP,
-            message = "TCP/5555 reconnect failed; enable Wireless debugging to recover",
-            verifiedUid = null)
+            message = "TCP/5555 was not UID-2000 verified after adbd restart",
+            transport = AdbTransportMode.NONE, verifiedUid = null)
         return false
     }
 
