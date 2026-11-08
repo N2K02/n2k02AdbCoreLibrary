@@ -9,13 +9,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -88,7 +86,7 @@ fun AdbConnectionSettingsPage(
                 "Read only Android's pairing dialog through Accessibility.",
                 onCheckedChange = { autoPair = it })
             if (autoPair && !accessibilityEnabled) {
-                Text("Accessibility is required for automatic pairing. Manual pairing is available on Home.",
+                Text("Automatic pairing requires the enabled Accessibility reader and Android's pairing dialog.",
                     style = MaterialTheme.typography.bodySmall)
                 onOpenAccessibility?.let { action ->
                     OutlinedButton(onClick = action) { Text("Enable Accessibility") }
@@ -123,31 +121,45 @@ fun AdbConnectionSettingsPage(
 
 /** First-time pairing belongs on Home, not inside the shared Settings cards. */
 @Composable
-fun AdbHomeSetupPage(adb: AdbCore) {
+fun AdbHomeSetupPage(
+    adb: AdbCore,
+    accessibilityEnabled: Boolean = rememberAdbAccessibilityEnabled(),
+    onOpenAccessibility: (() -> Unit)? = null,
+) {
     val context = LocalContext.current
     val state by adb.state.collectAsState()
     val scope = rememberCoroutineScope()
-    // The host must call AdbPageLifecycle at a stable screen root (not a lazy item).
     AdbSection("ADB setup") {
-        Text(if (state.connected) "Connected • shell UID 2000 verified" else
-            "ADB setup required • shell UID 2000 not verified",
+        Text(if (state.connected) "Connected • shell UID 2000 verified"
+            else "Automatic ADB pairing and recovery",
             style = MaterialTheme.typography.titleSmall)
         Text(state.message, style = MaterialTheme.typography.bodySmall)
         if (!state.connected) {
-            Text("Enable Wireless debugging and USB debugging in Developer options.",
+            Text("Enable USB debugging and Wireless debugging. For the first " +
+                "authorization, open Android Settings > Wireless debugging > " +
+                "Pair device with pairing code. When Accessibility is enabled " +
+                "the code is captured and paired automatically from that dialog.",
                 style = MaterialTheme.typography.bodySmall)
+            if (!accessibilityEnabled) {
+                Text("Allow the pairing Accessibility service in Android Settings " +
+                    "for automatic pairing.", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = {
+                    onOpenAccessibility?.invoke() ?: context.startActivity(
+                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }, modifier = Modifier.fillMaxWidth()) { Text("Enable Accessibility") }
+            }
             OutlinedButton(onClick = {
                 context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }, modifier = Modifier.fillMaxWidth()) { Text("Open Developer options") }
-            Text("Automatic pairing is active. Open Android's 'Pair device with pairing code' " +
-                "dialog once and allow this app's pairing-code Accessibility service. " +
-                "The six-digit code and port are read from Android Settings; " +
-                "no manual entry is required.",
+            Text(if (state.scanning) "Searching for this phone's ADB services…"
+                else "Waiting for an authorized ADB service",
                 style = MaterialTheme.typography.bodySmall)
-            Text("Discovery: " + if (state.scanning) "Scanning" else "Waiting for Android",
+            Text("Pairing port: " + (state.pairingPort?.toString() ?: "Not detected"),
                 style = MaterialTheme.typography.bodySmall)
-
+            OutlinedButton(onClick = { scope.launch { adb.retry() } },
+                modifier = Modifier.fillMaxWidth()) { Text("Retry discovery") }
         }
     }
 }

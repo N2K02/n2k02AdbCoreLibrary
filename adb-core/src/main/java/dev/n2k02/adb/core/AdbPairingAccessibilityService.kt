@@ -8,41 +8,39 @@ import android.os.Looper
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/** Parsing is pure so every app uses the same allowlist, validation and privacy policy. */
+/** Only the OS Settings pairing dialog can supply an ephemeral six-digit code. */
 object AdbPairingCodePolicy {
+    fun isAndroidSettings(packageName: String?): Boolean = packageName in setOf(
+        "com.android.settings", "com.google.android.settings",
+        "com.samsung.android.settings", "com.android.tv.settings")
+    fun isPairingDialog(labels: List<String>): Boolean = labels.any {
+        it.contains("pairing code", ignoreCase = true) ||
+            it.contains("pair device with", ignoreCase = true) ||
+            it.contains("pair with device", ignoreCase = true)
+    }
     /**
-     * Android's "Pair device with pairing code" dialog also displays the
-     * phone's own "IP address & port". The port can be used when mDNS
-     * discovery is blocked; the IP is NEVER used as a remote destination.
-     * Require a visible pairing-dialog hint before examining endpoint text.
+     * The Android pairing dialog displays the local endpoint. When mDNS is
+     * delayed, read ONLY its port and still connect exclusively to loopback.
      */
     fun pairingPort(labels: List<String>): Int? {
-        if (labels.none { it.contains("pairing code", true) ||
-                it.contains("pair device with", true) ||
-                it.contains("pair with device", true) }) return null
-        val endpoint = Regex("""(?:[0-9]{1,3}\.){3}[0-9]{1,3}:([0-9]{2,5})(?![0-9])""")
-        val explicit = Regex("""(?i)pairing\s+port\s*[:#]?\s*([0-9]{2,5})(?![0-9])""")
+        if (!isPairingDialog(labels)) return null
+        val endpoint = Regex("""(?:[0-9]{1,3}\\.){3}[0-9]{1,3}:([0-9]{2,5})(?![0-9])""")
+        val explicit = Regex("""(?i)pairing\\s+port\\s*[:#]?\\s*([0-9]{2,5})(?![0-9])""")
         return labels.asSequence().mapNotNull { label ->
             (endpoint.find(label)?.groupValues?.get(1) ?:
                 explicit.find(label)?.groupValues?.get(1))?.toIntOrNull()
         }.firstOrNull { it in 1..65535 }
     }
 
-    fun isAndroidSettings(packageName: String?): Boolean = packageName in setOf(
-        "com.android.settings", "com.google.android.settings",
-        "com.samsung.android.settings", "com.android.tv.settings")
     fun extract(labels: List<String>): String? {
-        if (labels.none {
-                it.contains("pairing code", ignoreCase = true) ||
-                    it.contains("pair device with", ignoreCase = true) ||
-                    it.contains("pair with device", ignoreCase = true)
-            }) return null
+        if (!isPairingDialog(labels)) return null
         return labels.asSequence().map(String::trim)
             .firstOrNull { it.length == 6 && it.all { character -> character in '0'..'9' } }
             ?: labels.asSequence().filter { it.contains("pairing code", ignoreCase = true) }
@@ -52,24 +50,38 @@ object AdbPairingCodePolicy {
 }
 
 /**
- * Optional accessibility flow with no app-specific code. The host registers its
- * AdbCore in Application.onCreate through AdbCoreRegistry.install(core).
- * This service never performs clicks or records logs, codes, or screen contents.
+ * Shared pairing Accessibility reader. Apps may subclass solely to bootstrap
+ * their existing authorized identity through acquireCore().
+ *
+ * Android requires the user to enable this service and open the system Wireless
+ * debugging pairing dialog for the initial trust grant. Never click, record,
+ * persist, log or upload pairing codes.
  */
-class SharedAdbPairingAccessibilityService : AccessibilityService() {
+open class SharedAdbPairingAccessibilityService : AccessibilityService() {
     companion object {
-        fun isEnabled(context: Context): Boolean {
+        @Volatile private var active: SharedAdbPairingAccessibilityService? = null
+
+        fun isEnabled(
+            context: Context,
+            serviceClass: Class<out AccessibilityService> = SharedAdbPairingAccessibilityService::class.java,
+        ): Boolean {
             val services = Settings.Secure.getString(context.contentResolver,
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
-            val component = ComponentName(context, SharedAdbPairingAccessibilityService::class.java)
-                .flattenToString()
-            return services.split(':').any { it.equals(component, ignoreCase = true) }
+            val name = ComponentName(context, serviceClass).flattenToString()
+            return services.split(':').any { it.equals(name, ignoreCase = true) }
         }
+
+        /** React when a pairing port appears *after* the Settings dialog. */
+        fun notifyPairingPortDiscovered() { active?.scheduleRead() }
     }
+
+    protected open fun acquireCore(): AdbCore? = AdbCoreRegistry.current
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val handler = Handler(Looper.getMainLooper())
-    private var lastSignature: Int? = null
+    @Volatile private var lastSignature: Int? = null
     private var remaining = 0
+    private var attempts = 0
     private val read = object : Runnable {
         override fun run() {
             if (scan()) return
@@ -79,47 +91,62 @@ class SharedAdbPairingAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        schedule()
+        active = this
+        acquireCore()
+        scheduleRead()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val core = AdbCoreRegistry.current ?: return
-        if (event == null || !core.preferences.enabled(AdbOption.AUTO_PAIR) ||
+        if (event == null ||
             !AdbPairingCodePolicy.isAndroidSettings(event.packageName?.toString())) return
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
-            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        schedule()
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
+        scheduleRead()
     }
 
-    private fun schedule() {
+    private fun scheduleRead() {
         handler.removeCallbacks(read)
-        remaining = 15
+        remaining = 75 // Up to 30s for a pairing port discovered later via mDNS.
         handler.post(read)
     }
 
     private fun scan(): Boolean {
-        val core = AdbCoreRegistry.current ?: return true
-        if (!core.preferences.enabled(AdbOption.AUTO_PAIR)) return false
+        val core = acquireCore() ?: return false
+        if (!core.preferences.enabled(AdbOption.AUTO_PAIR)) return true
         val root = rootInActiveWindow ?: return false
         if (!AdbPairingCodePolicy.isAndroidSettings(root.packageName?.toString())) return false
-        val nodes = ArrayDeque<AccessibilityNodeInfo>()
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
         val labels = mutableListOf<String>()
-        nodes.add(root)
+        queue.add(root)
         var visited = 0
-        while (nodes.isNotEmpty() && visited++ < 100) {
-            val node = nodes.removeFirst()
+        while (queue.isNotEmpty() && visited++ < 120) {
+            val node = queue.removeFirst()
             node.text?.toString()?.let(labels::add)
             node.contentDescription?.toString()?.let(labels::add)
-            repeat(node.childCount.coerceAtMost(20)) { i -> node.getChild(i)?.let(nodes::add) }
+            repeat(node.childCount.coerceAtMost(20)) { i -> node.getChild(i)?.let(queue::add) }
         }
+        // Discovery is temporarily owned only when the real OS dialog is visible.
+        if (!AdbPairingCodePolicy.isPairingDialog(labels)) return false
+        core.beginAutomaticPairingDiscovery()
         val code = AdbPairingCodePolicy.extract(labels) ?: return false
         val port = core.state.value.pairingPort
             ?: AdbPairingCodePolicy.pairingPort(labels)
             ?: return false
         val signature = (port.toString() + ":" + root.windowId + ":" + code).hashCode()
-        if (lastSignature != signature) {
+        if (lastSignature != signature && attempts < 3) {
             lastSignature = signature
-            scope.launch { core.pair(port, code) }
+            scope.launch {
+                val success = try {
+                    core.pair(port, code)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) { false }
+                if (success) attempts = 0
+                else {
+                    attempts++
+                    lastSignature = null
+                }
+            }
         }
         return true
     }
@@ -127,6 +154,8 @@ class SharedAdbPairingAccessibilityService : AccessibilityService() {
     override fun onInterrupt() { handler.removeCallbacks(read) }
     override fun onDestroy() {
         handler.removeCallbacks(read)
+        acquireCore()?.endAutomaticPairingDiscovery()
+        if (active === this) active = null
         scope.cancel()
         super.onDestroy()
     }

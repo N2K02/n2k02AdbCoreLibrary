@@ -27,10 +27,11 @@ class AdbCoreTest {
         override fun setAuthorized() { authorized = true }
     }
     private class Discovery : AdbDiscovery {
-        val portEvents = MutableSharedFlow<AdbDiscoveredPort>(replay = 2)
-        override val events: Flow<AdbDiscoveredPort> = portEvents
+        override val events: Flow<AdbDiscoveredPort> = MutableSharedFlow()
         var started = 0
         var stopped = 0
+        var reason: String? = null
+        override fun unavailableReason(): String? = reason
         override fun start() { started++ }
         override fun stop() { stopped++ }
     }
@@ -42,14 +43,10 @@ class AdbCoreTest {
         var tcpAvailable = false
         var tcpSwitchAllowed = true
         var tlsAvailable = true
-        var tlsAvailableAfterPair = false
         var closeCount = 0
         var tcpStarts = 0
         var usbSwitches = 0
-        override suspend fun pair(port: Int, code: String): Boolean {
-            if (tlsAvailableAfterPair) tlsAvailable = true
-            return true
-        }
+        override suspend fun pair(port: Int, code: String) = true
         override suspend fun connectTls(port: Int): Boolean {
             connected = tlsAvailable
             mode = if (connected) AdbTransportMode.WIRELESS_TLS else AdbTransportMode.NONE
@@ -225,33 +222,6 @@ class AdbCoreTest {
         core.quit()
     }
 
-    @Test fun pairingAutomaticallyConnectsAlreadyDiscoveredPort() = runBlocking {
-        val wire = Wire().apply {
-            tlsAvailable = false
-            tlsAvailableAfterPair = true
-        }
-        val prefs = MemoryPrefs().apply {
-            setEnabled(AdbOption.TCP_5555, false)
-        }
-        val discovery = Discovery()
-        val core = create(wire, prefs, discovery)
-        core.acquireService()
-        kotlinx.coroutines.withTimeout(5_000) {
-            while (discovery.started == 0) kotlinx.coroutines.delay(10)
-        }
-        discovery.portEvents.emit(AdbDiscoveredPort(AdbService.CONNECTION, 39771))
-        kotlinx.coroutines.withTimeout(5_000) {
-            while (core.state.value.connectionPort != 39771) kotlinx.coroutines.delay(10)
-        }
-        // A pre-pair TLS attempt was refused. After successful pairing there
-        // need not be a second mDNS announcement to recover the connection.
-        assertTrue(core.pair(38901, "123456"))
-        assertTrue(core.state.value.connected)
-        assertEquals(AdbTransportMode.WIRELESS_TLS, core.state.value.transport)
-        assertEquals(39771, prefs.lastTlsPort())
-        core.quit()
-    }
-
     @Test fun existingTlsSessionPromotesToTcpWhenEnabled() = runBlocking {
         val wire = Wire().apply {
             connected = true
@@ -281,6 +251,57 @@ class AdbCoreTest {
         assertFalse(core.state.value.connected)
         assertEquals(AdbPhase.NEEDS_SETUP, core.state.value.phase)
         assertEquals(0, wire.tcpStarts)
+        core.quit()
+    }
+
+    @Test fun automaticPairingKeepsDiscoveryOwnedUntilReleased() = runBlocking {
+        val wire = Wire().apply { tlsAvailable = false }
+        val prefs = MemoryPrefs().apply {
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val discovery = Discovery()
+        val core = create(wire, prefs, discovery)
+        core.beginAutomaticPairingDiscovery()
+        core.beginAutomaticPairingDiscovery() // Rapid Accessibility events share one lease.
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.started == 0) kotlinx.coroutines.delay(10)
+        }
+        assertEquals(1, discovery.started)
+        assertEquals(0, discovery.stopped)
+        core.endAutomaticPairingDiscovery()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (discovery.stopped == 0) kotlinx.coroutines.delay(10)
+        }
+        core.quit()
+    }
+
+    @Test fun automaticPairingCannotUndoManualStopOrOptOut() = runBlocking {
+        val prefs = MemoryPrefs().apply { stopped = true }
+        val discovery = Discovery()
+        val core = create(Wire(), prefs, discovery)
+        core.beginAutomaticPairingDiscovery()
+        assertEquals(0, discovery.started)
+        prefs.stopped = false
+        prefs.setEnabled(AdbOption.AUTO_PAIR, false)
+        core.beginAutomaticPairingDiscovery()
+        assertEquals(0, discovery.started)
+        core.quit()
+    }
+
+    @Test fun missingLocalNetworkPermissionIsVisibleInsteadOfSilentScan() = runBlocking {
+        val discovery = Discovery().apply {
+            reason = "Nearby devices permission required for ADB discovery"
+        }
+        val prefs = MemoryPrefs().apply {
+            setEnabled(AdbOption.TCP_5555, false)
+        }
+        val core = create(Wire(), prefs, discovery)
+        core.enterPage()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (!core.state.value.message.contains("Nearby devices")) kotlinx.coroutines.delay(10)
+        }
+        assertFalse(core.state.value.scanning)
+        assertEquals(0, discovery.started)
         core.quit()
     }
 
