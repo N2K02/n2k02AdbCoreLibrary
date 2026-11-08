@@ -83,6 +83,32 @@ class AdbCoreTest {
     private fun create(wire: Wire, prefs: MemoryPrefs = MemoryPrefs(), discovery: Discovery = Discovery()) =
         AdbCore(wire, prefs, discovery, listenerAvailable = { false })
 
+    @Test fun pairingConnectsPreviouslyDiscoveredTlsPortWithoutAnotherMdnsEvent() = runBlocking {
+        val wire = Wire().apply { tlsAvailable = false }
+        val prefs = MemoryPrefs().apply { setEnabled(AdbOption.TCP_5555, false) }
+        val events = MutableSharedFlow<AdbDiscoveredPort>(extraBufferCapacity = 4)
+        val discovery = object : AdbDiscovery {
+            override val events: Flow<AdbDiscoveredPort> = events
+            override fun start() = Unit
+            override fun stop() = Unit
+        }
+        val core = AdbCore(wire, prefs, discovery, listenerAvailable = { false })
+        core.enterPage()
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (!core.state.value.scanning) kotlinx.coroutines.delay(10)
+        }
+        events.emit(AdbDiscoveredPort(AdbService.CONNECTION, 37000))
+        kotlinx.coroutines.withTimeout(5_000) {
+            while (core.state.value.connectionPort != 37000) kotlinx.coroutines.delay(10)
+        }
+        kotlinx.coroutines.delay(50)
+        wire.tlsAvailable = true
+        assertTrue(core.pair(37001, "123456"))
+        assertTrue(core.state.value.connected)
+        assertEquals(AdbTransportMode.WIRELESS_TLS, core.state.value.transport)
+        core.quit()
+    }
+
     @Test fun verifiedHookCanExecutePrivilegedCommandWithoutDeadlock() = runBlocking {
         val wire = Wire()
         val prefs = MemoryPrefs().apply {
