@@ -44,6 +44,7 @@ class AdbCore(
     private var retryJob: Job? = null
     private var pairingSession: Job? = null
     @Volatile private var connectingPort: Int? = null
+    private val discoveredPortRetry = DiscoveryPortRetryGate()
 
     init {
         scope.launch {
@@ -60,7 +61,9 @@ class AdbCore(
                 }
                 if (event.service == AdbService.CONNECTION && !_state.value.connected) {
                     // Duplicate mDNS resolves must not cancel an in-flight TLS handshake.
-                    if (connectingPort == event.port && retryJob?.isActive == true) return@collect
+                    if (_state.value.phase == AdbPhase.PAIRING ||
+                        (connectingPort == event.port && retryJob?.isActive == true) ||
+                        !discoveredPortRetry.mayAttempt(event.port)) return@collect
                     retryJob?.cancel()
                     connectingPort = event.port
                     retryJob = scope.launch {

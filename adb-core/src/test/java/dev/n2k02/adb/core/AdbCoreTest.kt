@@ -466,4 +466,18 @@ class AdbCoreTest {
         assertEquals(0, wire.tcpStarts)
         core.quit()
     }
+    @Test fun duplicateMdnsAnnouncementsHaveBoundedRetryWithFreshPortImmediate() {
+        var clock = 1_000L
+        val gate = DiscoveryPortRetryGate(clockMillis = { clock }, cooldownMs = 15_000L)
+        assertTrue(gate.mayAttempt(37123))
+        assertFalse(gate.mayAttempt(37123))
+        clock += 1_000L
+        assertFalse(gate.mayAttempt(37123))
+        assertTrue(gate.mayAttempt(37124))
+        clock += 15_000L
+        assertTrue(gate.mayAttempt(37124))
+        gate.reset()
+        assertTrue(gate.mayAttempt(37124))
+    }
+
 }
