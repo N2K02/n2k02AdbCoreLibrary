@@ -31,8 +31,8 @@ object AdbPairingCodePolicy {
      */
     fun pairingPort(labels: List<String>): Int? {
         if (!isPairingDialog(labels)) return null
-        val endpoint = Regex("""(?:[0-9]{1,3}\\.){3}[0-9]{1,3}:([0-9]{2,5})(?![0-9])""")
-        val explicit = Regex("""(?i)pairing\\s+port\\s*[:#]?\\s*([0-9]{2,5})(?![0-9])""")
+        val endpoint = Regex("""(?:[0-9]{1,3}\.){3}[0-9]{1,3}:([0-9]{2,5})(?![0-9])""")
+        val explicit = Regex("""(?i)pairing\s+port\s*[:#]?\s*([0-9]{2,5})(?![0-9])""")
         return labels.asSequence().mapNotNull { label ->
             (endpoint.find(label)?.groupValues?.get(1) ?:
                 explicit.find(label)?.groupValues?.get(1))?.toIntOrNull()
