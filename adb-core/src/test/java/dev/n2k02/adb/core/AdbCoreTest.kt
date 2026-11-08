@@ -42,6 +42,8 @@ class AdbCoreTest {
         var actionCalls = 0
         var tcpAvailable = false
         var tcpSwitchAllowed = true
+        var tcpSwitchReportsReset = false
+        var tcpSwitchCalls = 0
         var tlsAvailable = true
         var closeCount = 0
         var tcpStarts = 0
@@ -64,11 +66,12 @@ class AdbCoreTest {
             return "command output"
         }
         override suspend fun switchToTcp(): Boolean {
+            tcpSwitchCalls++
             if (!tcpSwitchAllowed) return false
             connected = false
             mode = AdbTransportMode.NONE
             tcpAvailable = true
-            return true
+            return !tcpSwitchReportsReset
         }
         override suspend fun switchToUsb(): Boolean {
             usbSwitches++
@@ -262,6 +265,35 @@ class AdbCoreTest {
         assertEquals(AdbTransportMode.LOCAL_TCP_5555, core.state.value.transport)
         assertTrue(wire.tcpStarts > 0)
         kotlinx.coroutines.withTimeout(5_000) { hook.await() }
+        core.quit()
+    }
+
+    @Test fun tcpCommandResetCanStillYieldVerifiedLocalhostShell() = runBlocking {
+        val wire = Wire().apply {
+            connected = true
+            mode = AdbTransportMode.WIRELESS_TLS
+            tcpSwitchReportsReset = true
+        }
+        val core = AdbCore(wire, MemoryPrefs(), Discovery(),
+            listenerAvailable = { wire.tcpAvailable })
+        assertTrue(core.retry())
+        assertEquals(AdbTransportMode.LOCAL_TCP_5555, core.state.value.transport)
+        assertEquals(2000, core.state.value.verifiedUid)
+        assertEquals(1, wire.tcpSwitchCalls)
+        core.quit()
+    }
+
+    @Test fun occupiedTcpListenerNeverTriggersAnAdbdRestart() = runBlocking {
+        val wire = Wire().apply {
+            connected = true
+            mode = AdbTransportMode.WIRELESS_TLS
+        }
+        val prefs = MemoryPrefs().apply { tlsPort = 37000 }
+        val core = AdbCore(wire, prefs, Discovery(), listenerAvailable = { true })
+        assertTrue(core.retry())
+        assertEquals(0, wire.tcpSwitchCalls)
+        assertEquals(AdbTransportMode.WIRELESS_TLS, core.state.value.transport)
+        assertTrue(core.state.value.message.contains("listener left unchanged"))
         core.quit()
     }
 
