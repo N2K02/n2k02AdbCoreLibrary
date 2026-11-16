@@ -21,6 +21,7 @@ class AdbDiagnosticRetryPolicyTest {
 
     @Test fun onlyDisconnectedTransportErrorsAreRecoverable() {
         assertTrue(AdbDiagnosticRetryPolicy.disconnected(IOException("Socket closed")))
+        assertFalse(AdbDiagnosticRetryPolicy.disconnected(java.net.SocketTimeoutException("deadline")))
         assertTrue(AdbDiagnosticRetryPolicy.disconnected(IllegalStateException("ADB is not connected")))
         assertFalse(AdbDiagnosticRetryPolicy.disconnected(SecurityException("UID not verified")))
         assertFalse(AdbDiagnosticRetryPolicy.disconnected(IllegalStateException("deadline exceeded")))
