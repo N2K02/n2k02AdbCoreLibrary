@@ -33,6 +33,8 @@ class LibAdbWire(
         const val TCP_PORT = 5555
         const val SHELL_SERVICE = "exec:sh"
     }
+    /** Per-wire bounded, secret-free latency and failure metrics for diagnostics pages. */
+    val telemetry = AdbTransportTelemetry()
     private val mutex = Mutex()
     private val detached = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var manager: AbsAdbConnectionManager? = null
@@ -108,10 +110,29 @@ class LibAdbWire(
         }
     }
 
-    override suspend fun connectTls(port: Int) = open(port, true)
-    override suspend fun connectTcp() = open(TCP_PORT, false)
+    private suspend fun measure(
+        stage: AdbTransportTelemetry.Stage,
+        action: suspend () -> Boolean,
+    ): Boolean {
+        val started = System.nanoTime()
+        var success = false
+        try {
+            success = action()
+            return success
+        } finally {
+            telemetry.record(stage, (System.nanoTime() - started) / 1_000_000L, success)
+        }
+    }
 
-    override suspend fun pair(port: Int, code: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun connectTls(port: Int) =
+        measure(AdbTransportTelemetry.Stage.CONNECT_TLS) { open(port, true) }
+    override suspend fun connectTcp() =
+        measure(AdbTransportTelemetry.Stage.CONNECT_TCP) { open(TCP_PORT, false) }
+
+    override suspend fun pair(port: Int, code: String): Boolean =
+        measure(AdbTransportTelemetry.Stage.PAIR) { pairInternal(port, code) }
+
+    private suspend fun pairInternal(port: Int, code: String): Boolean = withContext(Dispatchers.IO) {
         mutex.withLock {
             require(AdbVerification.validPairing(port, code))
             val old = manager
@@ -130,7 +151,20 @@ class LibAdbWire(
     }
 
     /** A reusable, serialized shell with a per-session sentinel. Never interleave commands. */
-    override suspend fun run(command: String, timeoutMs: Long): String = withContext(Dispatchers.IO) {
+    override suspend fun run(command: String, timeoutMs: Long): String {
+        val started = System.nanoTime()
+        var success = false
+        try {
+            val result = runInternal(command, timeoutMs)
+            success = true
+            return result
+        } finally {
+            telemetry.record(AdbTransportTelemetry.Stage.SHELL,
+                (System.nanoTime() - started) / 1_000_000L, success)
+        }
+    }
+
+    private suspend fun runInternal(command: String, timeoutMs: Long): String = withContext(Dispatchers.IO) {
         require(timeoutMs in 500L..180_000L)
         mutex.withLock {
             val current = manager ?: error("ADB transport disconnected")
