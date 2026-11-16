@@ -38,7 +38,7 @@ object AdbDiagnosticRetryPolicy {
             simpleRead(command)
 
     fun disconnected(failure: Exception): Boolean =
-        failure is IOException ||
+        (failure is IOException && failure !is java.net.SocketTimeoutException) ||
             (failure is IllegalStateException && listOf("ADB is not connected",
                 "ADB transport disconnected", "stream closed").any {
                     failure.message?.contains(it, ignoreCase = true) == true
