@@ -8,6 +8,10 @@ class AdbDiagnosticRetryPolicyTest {
     @Test fun allowsOnlyReadOnlySnapshots() {
         assertTrue(AdbDiagnosticRetryPolicy.allowsReplay("dumpsys jobscheduler | head -c 196608"))
         assertTrue(AdbDiagnosticRetryPolicy.allowsReplay("logcat -d -t 100 -v threadtime"))
+        assertTrue(AdbDiagnosticRetryPolicy.allowsReplay(
+            "cat /proc/meminfo; echo __MCP_PSI__; cat /proc/pressure/memory 2>&1"))
+        assertTrue(AdbDiagnosticRetryPolicy.allowsReplay(
+            "ps -A -o PID,UID,NAME | head -n 1500"))
         assertFalse(AdbDiagnosticRetryPolicy.allowsReplay("dumpsys SurfaceFlinger --timestats -clear -enable"))
         assertFalse(AdbDiagnosticRetryPolicy.allowsReplay("dumpsys SurfaceFlinger --timestats -disable"))
         assertFalse(AdbDiagnosticRetryPolicy.allowsReplay("pm grant pkg android.permission.DUMP"))
@@ -17,6 +21,8 @@ class AdbDiagnosticRetryPolicyTest {
             "dumpsys battery; settings put global adb_enabled 0"))
         assertFalse(AdbDiagnosticRetryPolicy.allowsReplay(
             "dumpsys jobscheduler | sh"))
+        assertFalse(AdbDiagnosticRetryPolicy.allowsReplay(
+            "cat /proc/meminfo; echo __MCP_PSI__; cat /proc/version 2>&1"))
     }
 
     @Test fun onlyDisconnectedTransportErrorsAreRecoverable() {
