@@ -21,9 +21,21 @@ object AdbDiagnosticRetryPolicy {
         "-clear", "-enable", "-disable", "--reset",
         "settings put", "pm grant", "pm revoke", "tcpip:", "usb:"
     )
+    private fun simpleRead(command: String): Boolean {
+        if (command.any { it == ';' || it == '\n' || it == '\r' ||
+                    it == '`' || it == '>' || it == '<' }) return false
+        if (listOf("$(", "&&", "||").any(command::contains)) return false
+        return command.split("|").drop(1).all { pipe ->
+            listOf("head ", "grep ", "tail ", "cut ").any {
+                pipe.trimStart().startsWith(it)
+            }
+        }
+    }
+
     fun allowsReplay(command: String): Boolean =
         safePrefixes.any(command::startsWith) &&
-            forbidden.none { command.contains(it, ignoreCase = true) }
+            forbidden.none { command.contains(it, ignoreCase = true) } &&
+            simpleRead(command)
 
     fun disconnected(failure: Exception): Boolean =
         failure is IOException ||
