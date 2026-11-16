@@ -13,6 +13,10 @@ class AdbDiagnosticRetryPolicyTest {
         assertFalse(AdbDiagnosticRetryPolicy.allowsReplay("pm grant pkg android.permission.DUMP"))
         assertFalse(AdbDiagnosticRetryPolicy.allowsReplay("dumpsys battery --reset"))
         assertFalse(AdbDiagnosticRetryPolicy.allowsReplay("id -u"))
+        assertFalse(AdbDiagnosticRetryPolicy.allowsReplay(
+            "dumpsys battery; settings put global adb_enabled 0"))
+        assertFalse(AdbDiagnosticRetryPolicy.allowsReplay(
+            "dumpsys jobscheduler | sh"))
     }
 
     @Test fun onlyDisconnectedTransportErrorsAreRecoverable() {
