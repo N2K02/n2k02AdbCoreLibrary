@@ -15,12 +15,17 @@ object AdbDiagnosticRetryPolicy {
         "dumpsys audio", "dumpsys activity", "dumpsys gfxinfo",
         "dumpsys SurfaceFlinger --list", "dumpsys SurfaceFlinger --timestats -dump",
         "dumpsys -l", "top ", "cat /proc/", "logcat -d",
-        "pm list packages", "pidof ", "head -c "
+        "pm list packages", "pidof ", "head -c ",
+        "dumpsys meminfo", "dumpsys package ", "ps -A -o PID,UID,NAME",
+        "cmd activity get-uid-state "
     )
     private val forbidden = listOf(
         "-clear", "-enable", "-disable", "--reset",
         "settings put", "pm grant", "pm revoke", "tcpip:", "usb:"
     )
+    private const val MEMORY_SNAPSHOT =
+        "cat /proc/meminfo; echo __MCP_PSI__; cat /proc/pressure/memory 2>&1"
+
     private fun simpleRead(command: String): Boolean {
         if (command.any { it == ';' || it == '\n' || it == '\r' ||
                     it == '`' || it == '>' || it == '<' }) return false
@@ -33,9 +38,11 @@ object AdbDiagnosticRetryPolicy {
     }
 
     fun allowsReplay(command: String): Boolean =
-        safePrefixes.any(command::startsWith) &&
-            forbidden.none { command.contains(it, ignoreCase = true) } &&
-            simpleRead(command)
+        command == MEMORY_SNAPSHOT || (
+            safePrefixes.any(command::startsWith) &&
+                forbidden.none { command.contains(it, ignoreCase = true) } &&
+                simpleRead(command)
+        )
 
     fun disconnected(failure: Exception): Boolean =
         (failure is IOException && failure !is java.net.SocketTimeoutException) ||
